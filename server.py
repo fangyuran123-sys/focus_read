@@ -87,10 +87,11 @@ def markdown_zip(notes):
 
 
 class Desk:
-    def __init__(self, mount, data, converter=None, require_mount=True):
+    def __init__(self, mount, data, converter=None, require_mount=True, can_eject=True):
         self.mount, self.data = Path(mount).resolve(), Path(data).resolve()
         self.data.mkdir(parents=True, exist_ok=True)
         self.converter, self.require_mount = converter, require_mount
+        self.can_eject = can_eject
         self.lock = threading.RLock()
         self.token = secrets.token_urlsafe(32)
         self.db_path = self.data / 'desk.sqlite3'
@@ -251,7 +252,7 @@ class Desk:
                 notes.append(item)
             transfers = [dict(name=r[0], size=r[1], created=r[2]) for r in db.execute('SELECT name,size,created FROM transfers ORDER BY id DESC LIMIT 8')]
             return {**self.status, 'connected': self.connected(), 'mount': str(self.mount), 'notes': notes, 'transfers': transfers,
-                    'converter': bool(self.converter and Path(self.converter).is_file()), 'token': self.token,
+                    'converter': bool(self.converter and Path(self.converter).is_file()), 'token': self.token, 'can_eject': self.can_eject,
                     'model': 'Kindle 11 · 2022', 'firmware': '5.19.2.0.1', 'last_export': self.read_setting('last_export')}
 
     def send(self, source, name):
@@ -302,6 +303,8 @@ class Desk:
 
     def eject(self):
         with self.lock:
+            if not self.can_eject:
+                raise ValueError('容器模式请先停止容器，再从宿主机文件管理器安全弹出 Kindle。')
             self.device_path('documents')
             found = subprocess.run(['findmnt', '-rn', '-o', 'SOURCE', '--mountpoint', str(self.mount)], capture_output=True, text=True, timeout=10)
             device = found.stdout.strip()
@@ -426,8 +429,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(409, {'error': '操作失败，请检查设备连接、剩余空间与文件权限。'})
 
 
-def make_server(desk, port):
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+def make_server(desk, port, host='127.0.0.1'):
+    server = ThreadingHTTPServer((host, port), Handler)
     server.desk = desk
     actual_port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{actual_port}', f'localhost:{actual_port}'}
@@ -438,18 +441,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mount', default='/run/media/rose/Kindle')
     parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--host', default='127.0.0.1', help='监听地址；容器内使用 0.0.0.0，宿主机端口仍只发布到本机')
+    parser.add_argument('--no-eject', action='store_true', help='禁用宿主机设备弹出操作（容器使用）')
     parser.add_argument('--data', type=Path, default=BASE / 'data')
     parser.add_argument('--converter', default=shutil.which('ebook-convert'))
     args = parser.parse_args()
     local_converter = BASE / 'runtime/calibre/ebook-convert'
     converter = args.converter or (str(local_converter) if local_converter.is_file() else None)
-    desk = Desk(args.mount, args.data, converter)
+    desk = Desk(args.mount, args.data, converter, can_eject=not args.no_eject)
     try:
         desk.scan()
     except (OSError, sqlite3.Error, ValueError) as e:
         desk.status['warnings'] = ['初次读取失败，请连接设备后点击刷新。']
         print(type(e).__name__, flush=True)
-    server = make_server(desk, args.port)
+    server = make_server(desk, args.port, args.host)
     print(f'Kindle Desk: http://127.0.0.1:{args.port}', flush=True)
     try:
         server.serve_forever()

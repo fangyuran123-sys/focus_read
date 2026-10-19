@@ -31,6 +31,68 @@ python3 server.py --mount /实际/Kindle挂载点 --port 8766
 
 calibre 隔离安装在本目录的 `runtime/calibre/`，程序会自动找到。代码、页面、测试、数据库和转换工具都在 `/home/rose/tools/kindle` 内，不依赖原来的 Codex 工作区。也可以通过 Python 服务的 `--converter /完整路径/ebook-convert` 参数指定其他转换工具。
 
+## Docker 部署（Linux）
+
+需要 Linux Docker Engine 和 Docker Compose。USB 仍由宿主机挂载，容器读取这个目录；无需把整个 USB 总线或宿主机系统服务交给容器。镜像内已安装 calibre 和中文字体，运行时无需联网下载转换工具。
+
+首次准备，在项目目录执行：
+
+```sh
+mkdir -p data
+cp .env.example .env
+id -u
+id -g
+findmnt /run/media/rose/Kindle
+```
+
+编辑 `.env`：`KINDLE_MOUNT` 填实际挂载点，`LOCAL_UID`、`LOCAL_GID` 填上面两个 id 命令的结果。挂载点下应有 `documents`。默认数据目录为本项目的 `data/`，可继续使用已有摘录；更新时保留 `.env` 和 `data/`。
+
+构建并启动：
+
+```sh
+docker compose build
+# 若之前用 start.sh 启动，先停止，避免端口和数据目录被两个实例同时使用。
+systemctl --user stop kindle-desk
+docker compose up -d --wait
+```
+
+浏览器打开 <http://127.0.0.1:8765>。容器内部监听所有接口，但只向宿主机 `127.0.0.1:8765` 发布端口；原有本机 Host、Origin 和操作令牌校验保留。请保持映射两端端口一致为 8765。
+
+常用命令：
+
+```sh
+docker compose ps
+docker compose logs --tail=100 -f
+docker compose down
+# 更新代码后重建并重新创建容器，data/ 保留。
+docker compose up -d --build --wait
+```
+
+拔出 Kindle 前执行 `docker compose down`，再从宿主机文件管理器安全弹出。重新插入并挂载后执行 `docker compose up -d --wait`。当前采用单个设备目录的 bind mount；USB 重新挂载后必须重新创建容器，单纯刷新页面或重启原容器不能代替这一步。未配置开机自启，避免设备未挂载时启动。容器里的“安全弹出”按钮禁用。
+
+Kindle 和数据目录都必须事先存在；配置错误不会自动生成一个空的设备目录。容器以 `.env` 中的 UID/GID 运行，宿主机挂载必须允许该用户写入才能传书。容器不会修复或重新挂载只读设备。
+
+迁移镜像到另一台同架构 Linux 机器：
+
+```sh
+mkdir -p dist
+docker save kindle-desk:0.1.0 | gzip > dist/kindle-desk-0.1.0-linux-amd64.tar.gz
+```
+
+复制镜像包、`compose.yaml` 和 `.env.example` 到目标机器的同一目录。在目标机器执行：
+
+```sh
+gzip -dc kindle-desk-0.1.0-linux-amd64.tar.gz | docker load
+mkdir -p data
+cp .env.example .env
+# 编辑挂载路径和 UID/GID，连接并挂载 Kindle 后启动；无需复制源代码。
+docker compose up -d --no-build --wait
+```
+
+镜像不包含 `data/`、本机 `.env`、Git 历史或 `runtime/`。如果需要迁移已有摘录，先停止旧实例，再单独复制 `data/`。源码构建需要联网拉取基础镜像和 Debian 软件包；本次镜像为 Linux amd64，其他架构应在对应机器上重新构建。
+
+挂载行为参考 [Docker bind mounts 文档](https://docs.docker.com/engine/storage/bind-mounts/)。本方式适用于已挂载 Kindle 的 Linux 主机或虚拟机；没有验证 Windows Docker Desktop 的 USB 转接。
+
 ## 当前能力
 
 - 读取 USB 磁盘上的书籍、存储空间；重新连接后刷新，断开后保留最近一次书架。

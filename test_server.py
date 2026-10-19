@@ -138,6 +138,32 @@ class DeskTest(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
+    def test_container_eject_disabled_and_host_binding_keeps_access_checks(self):
+        self.desk.can_eject = False
+        with patch('server.subprocess.run') as run:
+            with self.assertRaisesRegex(ValueError, '宿主机'):
+                self.desk.eject()
+            run.assert_not_called()
+        server = make_server(self.desk, 0, host='0.0.0.0')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            conn.request('GET', '/api/state')
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertFalse(json.loads(response.read())['can_eject'])
+            conn.close()
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            conn.request('GET', '/api/state', headers={'Host': 'evil.example'})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 403)
+            response.read()
+            conn.close()
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
 
 if __name__ == '__main__':
     unittest.main()

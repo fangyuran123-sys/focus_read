@@ -1,0 +1,27 @@
+name: kindle-desk
+services:
+  kindle:
+    image: ${KINDLE_IMAGE:-kindle-desk:0.1.0}
+    build: .
+    init: true
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - type: bind
+        source: ${KINDLE_MOUNT:?请在 .env 中设置 Kindle 挂载路径}
+        target: /kindle
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KINDLE_DATA:-./data}
+        target: /app/data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

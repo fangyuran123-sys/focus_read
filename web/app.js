@@ -76,7 +76,8 @@ function render() {
   }
   if(!state.transfers.length)$('transfer-history').append(element('p','small muted','还没有传输记录。支持单本最大 200 MB。'));
   $('send').disabled=!state.connected||busy; renderNotes();
-  $('eject').disabled=!state.connected||busy;
+  $('eject').disabled=!state.connected||busy||state.can_eject===false;
+  $('eject').title=state.can_eject===false?'容器模式：停止容器后，在宿主机文件管理器安全弹出 Kindle。':'';
 }
 async function load(scan=false,notify=false){
   try{let next=await request(scan?'/api/scan':'/api/state',scan?'':undefined);if(!scan&&state&&!state.connected&&next.connected)next=await request('/api/scan','');state=next;render();if(notify)toast(state.connected?'读取完成。'+(state.added?'新增 '+state.added+' 条摘录。':''):'Kindle 未连接，正在显示本地缓存。');}
