@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let state = null, selected = [], busy = false, toastTimer;
+let state = null, selected = [], busy = false, toastTimer, folderAction = null;
 const size = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 const when = n => n ? new Date(n * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '尚未读取';
 function element(tag, cls, text) { const el = document.createElement(tag); if (cls) el.className = cls; if (text != null) el.textContent = text; return el; }
@@ -34,6 +34,53 @@ function renderNotes() {
     article.append(meta); list.append(article);
   }
 }
+const bookFolder = book => book.folder ?? book.path.split('/').slice(1,-1).join('/');
+function fillFolders(id, special=null, selectedValue=null) {
+  const select=$(id), previous=selectedValue ?? select.value;
+  const folders=state.folders || [...new Set(['',...state.books.map(bookFolder)])].sort();
+  const options=folders.map(folder=>new Option((folder||'根目录')+(id==='folder-filter'?' · '+state.books.filter(b=>bookFolder(b)===folder).length+' 本':''),folder));
+  if(special)options.unshift(new Option(special,'*'));
+  select.replaceChildren(...options);
+  if(options.some(option=>option.value===previous))select.value=previous;
+}
+function renderLibrary() {
+  const folder=$('folder-filter').value;
+  const books=state.books.filter(book=>folder==='*'||bookFolder(book)===folder);
+  $('library-count').textContent=folder==='*'?books.length+' 本':books.length+' / '+state.books.length+' 本';
+  $('library-status').textContent=state.connected?'本次读取':'离线缓存';
+  $('folder-path').textContent=folder==='*'?'Kindle / documents · 全部文件夹':'Kindle / documents'+(folder?' / '+folder:'');
+  $('books-list').replaceChildren();
+  if(!books.length)$('books-list').append(element('p','small muted',folder==='*'?'还没有读取到书籍。连接 Kindle 后刷新，或从左侧传入。':'这个分类里还没有书。传书时可选择此分类，或从其他分类移动图书。'));
+  for(const book of books){
+    const row=element('article','book-row'), cover=element('div','book-cover',book.title.slice(0,5)), info=element('div','book-info');
+    cover.setAttribute('aria-hidden','true'); const title=element('h3','book-title',book.title); title.title=book.title;
+    info.append(title,element('p','book-meta',book.format+' · '+size(book.size)),element('p','book-folder','▱ '+(bookFolder(book)||'根目录')));
+    const backup=element('a','book-backup','备份原文件 ↗'); backup.href='/api/book?id='+encodeURIComponent(book.id); backup.setAttribute('aria-label','备份 '+book.title); backup.setAttribute('aria-disabled',String(!state.connected));
+    if(!state.connected)backup.removeAttribute('href');
+    const move=element('button','text-button book-move','移动'); move.setAttribute('aria-label','移动 '+book.title); move.disabled=!state.connected||busy; move.onclick=()=>openFolderDialog(book);
+    const actions=element('div','book-actions'); actions.append(backup,move); info.append(actions); row.append(cover,info); $('books-list').append(row);
+  }
+  $('new-folder').disabled=!state.connected||busy;
+  $('upload-folder').disabled=!state.connected||busy;
+}
+function openFolderDialog(book=null) {
+  if(busy||!state.connected)return;
+  folderAction=book;
+  $('folder-dialog-title').textContent=book?'移动图书':'新建分类';
+  $('folder-dialog-detail').textContent=book?book.title:'分类会直接创建在 Kindle 的 documents 文件夹内。';
+  $('folder-name-field').hidden=!!book; $('folder-name').required=!book; $('folder-name').value='';
+  $('folder-target-label').textContent=book?'移动到':'创建在';
+  $('folder-confirm').textContent=book?'移动图书':'创建分类';
+  $('folder-error').hidden=true;
+  fillFolders('folder-target',null,book?bookFolder(book):$('folder-filter').value==='*'?'':$('folder-filter').value);
+  updateFolderPath(); $('folder-dialog').showModal();
+  (book?$('folder-target'):$('folder-name')).focus();
+}
+function updateFolderPath() {
+  const parts=[$('folder-target').value];
+  if(!folderAction)parts.push($('folder-name').value.trim());
+  $('folder-dialog-path').textContent='Kindle / documents'+parts.filter(Boolean).map(part=>' / '+part).join('');
+}
 function render() {
   $('connection').textContent=state.connected?'已连接':'未连接'; $('connection').className='status-pill'+(state.connected?'':' offline');
   $('connection-detail').textContent=state.connected?'USB 磁盘 · 连接正常':'离线浏览 · 本地缓存';
@@ -58,17 +105,9 @@ function render() {
   for(const title of [...new Set(state.notes.map(n=>n.title))])$('book-filter').add(new Option(title,title));
   $('book-filter').value=[...$('book-filter').options].some(o=>o.value===previous)?previous:'';
   $('converter-status').textContent=state.converter?'EPUB 会在本地转换为 AZW3':'EPUB 需要安装 calibre；可直接传 PDF / AZW3';
-  $('library-count').textContent=state.books.length+' 本'; $('library-status').textContent=state.connected?'本次读取':'离线缓存';
-  $('books-list').replaceChildren();
-  if(!state.books.length)$('books-list').append(element('p','small muted','还没有读取到书籍。连接 Kindle 后刷新，或从左侧传入。'));
-  for(const book of state.books){
-    const row=element('article','book-row'), cover=element('div','book-cover',book.title.slice(0,5)), info=element('div','book-info');
-    cover.setAttribute('aria-hidden','true'); const title=element('h3','book-title',book.title); title.title=book.title;
-    info.append(title,element('p','book-meta',book.format+' · '+size(book.size)));
-    const backup=element('a','book-backup','备份原文件 ↗'); backup.href='/api/book?id='+encodeURIComponent(book.id); backup.setAttribute('aria-label','备份 '+book.title); backup.setAttribute('aria-disabled',String(!state.connected));
-    if(!state.connected)backup.removeAttribute('href');
-    info.append(backup); row.append(cover,info); $('books-list').append(row);
-  }
+  fillFolders('folder-filter','全部分类');
+  fillFolders('upload-folder','Kindle Desk（默认目录）');
+  renderLibrary();
   $('transfer-history').replaceChildren();
   for(const item of state.transfers){
     const row=element('div','transfer-row'), label=element('div'); label.append(element('strong','',item.name),element('small','',when(item.created)+' · '+size(item.size)));
@@ -76,6 +115,7 @@ function render() {
   }
   if(!state.transfers.length)$('transfer-history').append(element('p','small muted','还没有传输记录。支持单本最大 200 MB。'));
   $('send').disabled=!state.connected||busy; renderNotes();
+  $('refresh').disabled=busy; $('import-notes').disabled=busy;
   $('eject').disabled=!state.connected||busy||state.can_eject===false;
   $('eject').title=state.can_eject===false?'容器模式：停止容器后，在宿主机文件管理器安全弹出 Kindle。':'';
 }
@@ -94,12 +134,28 @@ $('dropzone').onclick=()=>$('book-input').click();$('book-input').onchange=event
 for(const type of ['dragenter','dragover'])$('dropzone').addEventListener(type,event=>{event.preventDefault();$('dropzone').classList.add('dragging');});
 for(const type of ['dragleave','drop'])$('dropzone').addEventListener(type,event=>{event.preventDefault();$('dropzone').classList.remove('dragging');if(type==='drop')choose(event.dataTransfer.files);});
 $('cancel-files').onclick=()=>choose([]);
+$('folder-filter').onchange=renderLibrary;
+$('new-folder').onclick=()=>openFolderDialog();
+$('folder-target').onchange=updateFolderPath;
+$('folder-name').oninput=updateFolderPath;
+$('folder-cancel').onclick=()=>$('folder-dialog').close();
+$('folder-dialog').oncancel=event=>{if(busy)event.preventDefault();};
+$('folder-form').onsubmit=async event=>{
+  event.preventDefault(); if(busy||!state.connected)return;
+  const payload=folderAction?{id:folderAction.id,folder:$('folder-target').value}:{parent:$('folder-target').value,name:$('folder-name').value.trim()};
+  busy=true; render(); $('folder-confirm').disabled=true; $('folder-cancel').disabled=true; $('folder-error').hidden=true;
+  let result=null;
+  try{result=await request(folderAction?'/api/move':'/api/folders',JSON.stringify(payload));$('folder-dialog').close();toast(result.message);}
+  catch(error){$('folder-error').textContent=error.message;$('folder-error').hidden=false;}
+  finally{busy=false;$('folder-confirm').disabled=false;$('folder-cancel').disabled=false;await load(!result);if(result){$('folder-filter').value=result.folder;renderLibrary();}}
+};
 $('send').onclick=async()=>{
   if(busy||!selected.length)return; busy=true; render(); $('dropzone').disabled=true; $('cancel-files').disabled=true;
   $('transfer-state').hidden=false; let completed=0;
-  try{for(const file of selected){$('transfer-state').textContent='正在处理 '+file.name+'…'+(file.name.toLowerCase().endsWith('.epub')?' EPUB 转换可能需要一些时间。':'');const result=await request('/api/upload?name='+encodeURIComponent(file.name),file);completed++;$('transfer-state').textContent=result.message;}selected=[];$('pending').hidden=true;toast(completed+' 本书已复制到 Kindle。请安全弹出后查看。');}
+  const folder=$('upload-folder').value, destination=folder==='*'?'':'&folder='+encodeURIComponent(folder);
+  try{for(const file of selected){$('transfer-state').textContent='正在处理 '+file.name+'…'+(file.name.toLowerCase().endsWith('.epub')?' EPUB 转换可能需要一些时间。':'');const result=await request('/api/upload?name='+encodeURIComponent(file.name)+destination,file);completed++;$('transfer-state').textContent=result.message;}selected=[];$('pending').hidden=true;toast(completed+' 本书已复制到 Kindle。请安全弹出后查看。');}
   catch(error){selected=selected.slice(completed);$('pending-list').replaceChildren();for(const file of selected)$('pending-list').append(element('div','pending-file',file.name+' · '+size(file.size)));$('transfer-state').textContent=error.message;toast(error.message,true);}
   finally{busy=false;$('dropzone').disabled=false;$('cancel-files').disabled=false;await load();}
 };
 load();
-setInterval(()=>{if(!busy&&!document.hidden)load();},15000);
+setInterval(()=>{if(!busy&&!document.hidden&&!$('folder-dialog').open)load();},15000);

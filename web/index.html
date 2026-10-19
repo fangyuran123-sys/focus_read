@@ -46,20 +46,34 @@
             <button id="dropzone" class="dropzone"><svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><path d="M18 5v19m-7-7 7 7 7-7M7 25v6h22v-6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><strong>把书拖到这里</strong><span>或点击选择文件</span><small id="converter-status">EPUB 会在本地转换为 AZW3</small></button>
             <input id="book-input" type="file" accept=".epub,.pdf,.azw3,.azw,.mobi,.txt" multiple hidden>
             <input id="clippings-input" type="file" accept=".txt" hidden>
+            <label class="folder-field" for="upload-folder">传入分类<select id="upload-folder"><option value="*">Kindle Desk（默认目录）</option></select></label>
             <div id="pending" class="pending" hidden><div id="pending-list"></div><button id="send" class="button primary">传入 Kindle</button><button id="cancel-files" class="text-button">取消</button></div>
             <div id="transfer-state" class="transfer-state" role="status" hidden></div>
             <div id="transfer-history" class="transfer-history"><p class="small muted">还没有传输记录。支持单本最大 200 MB。</p></div>
           </section>
           <section class="card library-card" aria-labelledby="library-heading">
             <div class="section-heading"><div class="heading-inline"><h2 id="library-heading">设备书架</h2><span id="library-count" class="tiny">—</span></div><span id="library-status" class="tiny">本次读取</span></div>
+            <div class="folder-toolbar"><select id="folder-filter" aria-label="按文件夹筛选书籍"><option value="*">全部分类</option></select><button id="new-folder" class="text-button">＋ 新建分类</button></div>
+            <p id="folder-path" class="folder-path">Kindle / documents</p>
             <div id="books-list" class="books-list"><p class="muted small">正在读取书籍…</p></div>
-            <div class="library-foot"><span class="folder-icon" aria-hidden="true">▱</span><p>备份会下载原始书籍文件。<br>传入后请安全弹出，等待 Kindle 更新书架。</p></div>
+            <div class="library-foot"><span class="folder-icon" aria-hidden="true">▱</span><p>分类直接对应 Kindle 上的文件夹，不会变成屏幕上的收藏集。<br>整理后请安全弹出，等待 Kindle 更新书架。</p></div>
           </section>
         </div>
       </div>
     </main>
-    <footer class="page-footer"><span>Kindle Desk <span class="version">/ 本地版 0.1</span></span><span>离线可用 · 无需登录</span></footer>
+    <footer class="page-footer"><span>Kindle Desk <span class="version">/ 本地版 0.2</span></span><span>离线可用 · 无需登录</span></footer>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="folder-dialog" aria-labelledby="folder-dialog-title">
+    <form id="folder-form">
+      <h2 id="folder-dialog-title">新建分类</h2>
+      <p id="folder-dialog-detail" class="small muted"></p>
+      <label id="folder-name-field" class="folder-field" for="folder-name">分类名称<input id="folder-name" name="name" maxlength="100" placeholder="例如：文学" autocomplete="off" required></label>
+      <label class="folder-field" for="folder-target"><span id="folder-target-label">创建在</span><select id="folder-target"></select></label>
+      <p id="folder-dialog-path" class="folder-path"></p>
+      <p id="folder-error" class="folder-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="folder-cancel" type="button" class="button secondary">取消</button><button id="folder-confirm" type="submit" class="button primary">创建分类</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

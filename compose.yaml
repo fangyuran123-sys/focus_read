@@ -1,8 +1,8 @@
 name: kindle-desk
 services:
   kindle:
-    image: ${KINDLE_IMAGE:-kindle-desk:0.1.0}
-    build: .
+    image: ${KINDLE_IMAGE:-kindle-desk:0.2.0}
+    pull_policy: never
     init: true
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:

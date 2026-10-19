@@ -33,77 +33,93 @@ calibre 隔离安装在本目录的 `runtime/calibre/`，程序会自动找到�
 
 ## Docker 部署（Linux）
 
-需要 Linux Docker Engine 和 Docker Compose。USB 仍由宿主机挂载，容器读取这个目录；无需把整个 USB 总线或宿主机系统服务交给容器。镜像内已安装 calibre 和中文字体，运行时无需联网下载转换工具。
+镜像包含 Python、calibre 和中文字体。运行它的 Linux 主机只需 Docker Engine、Docker Compose，以及通常自带的 Bash 和 `mountpoint`；不需要 Python、Node.js、calibre 或源代码，也不需要联网下载运行依赖。
 
-首次准备，在项目目录执行：
+**Docker 封装软件环境，设备和数据仍依赖宿主机。** Kindle 必须先被宿主机识别为磁盘并挂载，当前用户必须能读写 `documents/`。虚拟机还需把 USB 交给虚拟机。此部署验证的是本地 Linux Docker Engine；不是远程 Docker daemon，也没有验证 Windows/macOS Docker Desktop 的可移动磁盘共享、USB 转接和文件移动行为。只有 Docker 并不能保证设备可访问。镜像包的 CPU 架构也要与目标机器匹配。
 
-```sh
-mkdir -p data
-cp .env.example .env
-id -u
-id -g
-findmnt /run/media/rose/Kindle
-```
+### 离线包启动（推荐）
 
-编辑 `.env`：`KINDLE_MOUNT` 填实际挂载点，`LOCAL_UID`、`LOCAL_GID` 填上面两个 id 命令的结果。挂载点下应有 `documents`。默认数据目录为本项目的 `data/`，可继续使用已有摘录；更新时保留 `.env` 和 `data/`。
-
-构建并启动：
+把 `kindle-desk-0.2.0-linux-amd64-bundle.tar.gz` 复制到另一台 Linux amd64 机器，解压并验证：
 
 ```sh
-docker compose build
-# 若之前用 start.sh 启动，先停止，避免端口和数据目录被两个实例同时使用。
-systemctl --user stop kindle-desk
-docker compose up -d --wait
+tar -xzf kindle-desk-0.2.0-linux-amd64-bundle.tar.gz
+cd kindle-desk-0.2.0-linux-amd64
+sha256sum -c SHA256SUMS
+docker load -i kindle-desk-0.2.0-linux-amd64.tar.gz
+# 先用宿主机文件管理器挂载 Kindle；替换成实际挂载路径。
+./docker-start.sh /实际/Kindle挂载点
 ```
 
-浏览器打开 <http://127.0.0.1:8765>。容器内部监听所有接口，但只向宿主机 `127.0.0.1:8765` 发布端口；原有本机 Host、Origin 和操作令牌校验保留。请保持映射两端端口一致为 8765。
+脚本校验挂载点、`documents/` 和写入权限，自动使用当前用户 UID/GID，并创建同目录的 `data/`。它固定使用随包的 Compose 文件，默认加载 `kindle-desk:0.2.0`，不会联网拉镜像或编译源码。无需创建 `.env`。查看地址：<http://127.0.0.1:8765>。
 
-常用命令：
+若本机版仍在运行，脚本会提示先执行 `systemctl --user stop kindle-desk`，避免两个实例占用同一端口或数据目录。它不会自动停止其他服务。Docker 运行时关闭终端不会停止应用；未配置开机自启。
+
+若要用已有数据目录或其他镜像，显式传入环境变量（脚本不读取 `.env`）：
 
 ```sh
-docker compose ps
-docker compose logs --tail=100 -f
-docker compose down
-# 更新代码后重建并重新创建容器，data/ 保留。
-docker compose up -d --build --wait
+KINDLE_DATA=/绝对路径/原来的data KINDLE_IMAGE=kindle-desk:0.2.0 ./docker-start.sh /实际/Kindle挂载点
 ```
 
-拔出 Kindle 前执行 `docker compose down`，再从宿主机文件管理器安全弹出。重新插入并挂载后执行 `docker compose up -d --wait`。当前采用单个设备目录的 bind mount；USB 重新挂载后必须重新创建容器，单纯刷新页面或重启原容器不能代替这一步。未配置开机自启，避免设备未挂载时启动。容器里的“安全弹出”按钮禁用。
+自定义 `KINDLE_DATA` 建议使用绝对路径；相对路径以脚本目录为基准。不要用 `sudo` 启动脚本；应让当前用户拥有 Docker 使用权限及 Kindle 写入权限。
 
-Kindle 和数据目录都必须事先存在；配置错误不会自动生成一个空的设备目录。容器以 `.env` 中的 UID/GID 运行，宿主机挂载必须允许该用户写入才能传书。容器不会修复或重新挂载只读设备。
+### 停止、重新连接与备份
 
-迁移镜像到另一台同架构 Linux 机器：
+以下命令在部署目录执行，挂载路径替换成实际值：
 
 ```sh
-mkdir -p dist
-docker save kindle-desk:0.1.0 | gzip > dist/kindle-desk-0.1.0-linux-amd64.tar.gz
+KINDLE_MOUNT=/实际/Kindle挂载点 docker compose ps
+KINDLE_MOUNT=/实际/Kindle挂载点 docker compose logs --tail=100 -f
+# 拔线前先停止并移除容器，再从宿主机文件管理器安全弹出。
+KINDLE_MOUNT=/实际/Kindle挂载点 docker compose down
+# 重新插入、挂载后再启动，脚本会强制重建容器以使用新挂载。
+./docker-start.sh /实际/Kindle挂载点
 ```
 
-复制镜像包、`compose.yaml` 和 `.env.example` 到目标机器的同一目录。在目标机器执行：
+当前采用单个设备目录的 bind mount，USB 重新挂载后应重建容器；单纯刷新页面或重启原容器不能代替这一步。容器里的“安全弹出”按钮禁用。
+
+`data/` 保存在宿主机，包含摘录数据库、离线书架、传输记录和未完成移动的恢复记录；重建容器不会删除它。升级或迁移时先停止旧实例，再备份或复制整个数据目录，启动新版时指向它。图书本体仍在 Kindle 中，备份 `data/` 不等于备份设备图书。离线包不包含个人数据、`.env` 或设备内容。
+
+### 从源码构建
+
+构建时需要联网拉取 Debian 基础镜像和软件包；构建完成后可离线运行。当前发布包为 Linux amd64，其他架构需要在对应机器上重新构建和验证。
 
 ```sh
-gzip -dc kindle-desk-0.1.0-linux-amd64.tar.gz | docker load
-mkdir -p data
-cp .env.example .env
-# 编辑挂载路径和 UID/GID，连接并挂载 Kindle 后启动；无需复制源代码。
-docker compose up -d --no-build --wait
+docker build --build-arg VERSION=0.2.0 --build-arg VCS_REF="$(git rev-parse HEAD)" -t kindle-desk:0.2.0 .
+./docker-start.sh /实际/Kindle挂载点
 ```
 
-镜像不包含 `data/`、本机 `.env`、Git 历史或 `runtime/`。如果需要迁移已有摘录，先停止旧实例，再单独复制 `data/`。源码构建需要联网拉取基础镜像和 Debian 软件包；本次镜像为 Linux amd64，其他架构应在对应机器上重新构建。
+仅导出镜像可使用 `docker save kindle-desk:0.2.0 | gzip > kindle-desk-0.2.0-linux-amd64.tar.gz`。部署时还需要 `compose.yaml`、`docker-start.sh` 和此说明；不需要复制源代码。镜像的 OCI version/revision 标签记录版本和构建时传入的源码提交，完整离线包另附 `BUILD.txt` 和校验清单。
 
-挂载行为参考 [Docker bind mounts 文档](https://docs.docker.com/engine/storage/bind-mounts/)。本方式适用于已挂载 Kindle 的 Linux 主机或虚拟机；没有验证 Windows Docker Desktop 的 USB 转接。
+### 手动 Compose（可选）
+
+如需自己管理配置，可复制 `.env.example` 为 `.env`，填写真实的挂载路径及 `id -u`、`id -g` 的值，先创建可写的 `data/`，再执行 `docker compose up -d --force-recreate --wait`。更新旧 `.env` 时应将 `KINDLE_IMAGE` 改为 `kindle-desk:0.2.0`。Compose 只运行已导入或已构建的镜像，不自动构建。
+
+容器以普通用户运行，根文件系统只读，只挂载 Kindle 和数据目录，不授予 privileged 或 USB 总线访问。端口只发布到宿主机 `127.0.0.1:8765`；Host、Origin 和操作令牌校验保留，端口映射两端应保持为 8765。设备目录必须事先存在，错误路径不会被自动创建；只读设备和权限问题由宿主机处理。
+
+参考 [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/) 和 [Docker Desktop USB 限制](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/general/#can-i-pass-through-a-usb-device-to-a-container)。
 
 ## 当前能力
 
 - 读取 USB 磁盘上的书籍、存储空间；重新连接后刷新，断开后保留最近一次书架。
+- 按 Kindle `documents/` 下的真实文件夹分类，显示已有分类及空目录；支持新建分类、子分类，传书时选择分类，以及移动单本书籍。
 - 解析中英文 `My Clippings.txt`，重复导入去重，按书名或内容搜索。
 - 读取 `ksdk_annotation_v1.db` 的标注位置和可识别的笔记正文。每次读取先复制到电脑，设备数据库保持只读。
 - 导出 Markdown ZIP，一本书一个文件，解压后可放入 Obsidian。
-- 拖入 EPUB/PDF/AZW3/AZW/MOBI/TXT 后点击“传入 Kindle”。EPUB 本地转 AZW3，目标目录为 `documents/Kindle Desk`，拒绝覆盖同名文件。上限 200 MB。
+- 拖入 EPUB/PDF/AZW3/AZW/MOBI/TXT 后选择“传入分类”，点击“传入 Kindle”。EPUB 本地转 AZW3；未选择分类时使用 `documents/Kindle Desk`，拒绝覆盖同名文件。上限 200 MB。
 - 下载设备上的原始书籍文件；这不等于去除 DRM 或保证其他阅读器可打开。
 - 在用户点击“安全弹出”时调用 Linux udisksctl 卸载当前 Kindle 挂载点。
 
 `data/desk.sqlite3` 保存本地索引、摘录和传输记录；`data/backups` 保存读取过的剪贴文件原件。删除本地数据目录会丢失离线记录。程序不会删除设备书籍或回写标注数据库。
+
+### 文件夹分类
+
+在“设备书架”下拉框选择分类，只显示该文件夹直接包含的书籍；子文件夹会作为独立分类列出。“新建分类”可以选择上级目录，书籍旁的“移动”可选择目标分类。分类对应实际路径，例如 `文学/散文` 就是 Kindle 上的 `documents/文学/散文`，重新连接和离线缓存都保留这个结构。
+
+移动时保持书籍文件名不变，并一起移动同名 `.sdr` 目录及可识别的 `.mbp`、`.mbp1`、`.mbs`、`.pdr`、`.apnx`、`.phl` 附件。目标位置出现同名文件或附件时拒绝移动；同名多格式书籍共用附件时也会拒绝，避免拆散关联。Linux 的不覆盖重命名操作用于防止并发覆盖。
+
+一次移动涉及多个文件，不能保证断电或拔线时整体原子完成。程序会先在本机 `data/moves/` 写入位置记录，普通失败会尝试回退；移动完成或回退成功后删除记录。若设备断开导致回退失败，记录会保留，并暂停后续移动。此时先停止整理，核对记录中的 `from`、`to`，确认书籍与附件处于同一目录、文件完整后，再清除对应记录；不要覆盖冲突文件。记录本身不包含书籍副本。
+
+整理完成后请安全弹出，让 Kindle 重新索引。文件夹分类用于本网页和磁盘文件整理，不会自动成为 Kindle 屏幕上的收藏集；原厂阅读界面的分类限制仍然适用。当前测试使用模拟设备，未对真实书籍的重索引、阅读进度或 KFX 附件关联作实机保证。
 
 ## 已知边界
 
@@ -117,7 +133,9 @@ docker compose up -d --no-build --wait
 ## 验证
 
 ```sh
-python3 -m unittest -v test_server.py
+python3 -m unittest -v test_server.py test_docker_start.py
+# 开发环境已构建镜像后，测试隔离容器、实际 EPUB 转换及重建后的数据保留。
+python3 check_docker.py
 ```
 
-测试使用临时目录模拟设备，不向实机写入测试书籍。
+测试使用临时目录模拟设备，不向实机写入测试书籍。容器测试使用随机本机端口和独立 Compose 项目，退出时清理测试容器，不停止现有服务。

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A loopback-only Kindle desk. Python standard library; calibre converts EPUB."""
 import argparse
+import ctypes
 import hashlib
 import io
 import json
@@ -23,6 +24,7 @@ BASE = Path(__file__).resolve().parent
 FORMATS = {'.azw', '.azw3', '.mobi', '.pdf', '.txt', '.kfx', '.prc'}
 UPLOAD_FORMATS = {'.azw', '.azw3', '.mobi', '.pdf', '.txt', '.epub'}
 MAX_UPLOAD = 200 * 1024 * 1024
+SIDECARS = ('.sdr', '.mbp', '.mbp1', '.mbs', '.pdr', '.apnx', '.phl')
 
 
 def digest(value):
@@ -42,6 +44,25 @@ def contained(path, root):
     if not resolved.is_relative_to(root.resolve()):
         raise ValueError('文件路径超出了允许的目录。')
     return resolved
+
+
+def folder_name(name):
+    if not isinstance(name, str):
+        raise ValueError('分类名称必须是文字。')
+    safe_name(name)
+    if name.startswith('.') or name.lower().endswith('.sdr') or name.endswith((' ', '.')) or any(c in name for c in '<>:"|?*'):
+        raise ValueError('分类名称不能是隐藏目录、书籍附件目录，或包含特殊字符。')
+    return name
+
+
+def rename_no_replace(source, target):
+    # Linux renameat2 prevents a concurrent file manager from being overwritten.
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = libc.renameat2
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
 
 
 def parse_clippings(text):
@@ -129,6 +150,90 @@ class Desk:
             raise ValueError('Kindle 已断开，请重新连接后重试。')
         return contained(self.mount / relative, self.mount)
 
+    def folder_path(self, relative):
+        if not isinstance(relative, str) or len(relative) > 1024:
+            raise ValueError('分类路径无效。')
+        root = self.device_path('documents')
+        path = root
+        for part in relative.split('/') if relative else []:
+            path = path / folder_name(part)
+            if path.is_symlink():
+                raise ValueError('分类路径不能包含符号链接。')
+        return contained(path, root)
+
+    def create_folder(self, parent, name):
+        with self.lock:
+            folder = self.folder_path(parent)
+            name = folder_name(name)
+            if not folder.is_dir():
+                raise ValueError('上级分类不存在，请刷新后重试。')
+            if any(p.name.casefold() == name.casefold() for p in folder.iterdir()):
+                raise ValueError('该位置已有同名文件或分类，请换一个名称。')
+            (folder / name).mkdir()
+            self.scan()
+            return {'folder': '/'.join(filter(None, (parent, name))), 'message': '分类已创建在 Kindle 上。'}
+
+    def move_book(self, book_id, destination):
+        with self.lock:
+            if any((self.data / 'moves').glob('*.json')):
+                raise ValueError('有未完成的移动记录，请先检查本机 data/moves 中的恢复记录，再继续整理。')
+            folder = self.folder_path(destination)
+            if not folder.is_dir():
+                raise ValueError('目标分类不存在，请刷新后重试。')
+            book = next((b for b in self.status['books'] if b['id'] == book_id), None)
+            if not book:
+                raise ValueError('书架已变化，请刷新后重新选择图书。')
+            parent = str(Path(book['path']).relative_to('documents').parent)
+            source = self.folder_path('' if parent == '.' else parent) / book['name']
+            if source.is_symlink() or not source.is_file():
+                raise ValueError('原书籍已变化或不可用，请刷新后重试。')
+            stat = source.stat()
+            if stat.st_size != book['size'] or stat.st_mtime != book['modified']:
+                raise ValueError('书籍在扫描后发生变化，请刷新后重试。')
+            if source.parent == folder:
+                return {'folder': destination, 'message': '这本书已在该分类中。'}
+            companions = [source.with_suffix(ext) for ext in SIDECARS]
+            companions = [p for p in companions if p.exists() or p.is_symlink()]
+            if companions and any(p != source and p.stem == source.stem and p.suffix.lower() in FORMATS for p in source.parent.iterdir()):
+                raise ValueError('这本书与同名的其他格式共用附件，请先备份并整理同名书籍。')
+            plan = [(p, folder / p.name) for p in [*companions, source]]
+            existing = {p.name.casefold() for p in folder.iterdir()}
+            for src, dst in plan:
+                if src.is_symlink():
+                    raise ValueError('书籍附件包含符号链接，无法安全移动。')
+                if dst.name.casefold() in existing:
+                    raise ValueError('目标分类已有同名书籍或附件，原文件未移动。')
+            history = self.data / 'moves'
+            history.mkdir(exist_ok=True)
+            journal = history / (secrets.token_hex(8) + '.json')
+            # A book and its sidecars cannot move atomically; retain a recovery plan until complete.
+            with journal.open('x', encoding='utf-8') as log:
+                json.dump({'mount': str(self.mount), 'moves': [{'from': str(a.relative_to(self.mount)), 'to': str(b.relative_to(self.mount))} for a, b in plan]}, log, ensure_ascii=False, indent=2)
+                log.flush()
+                os.fsync(log.fileno())
+            moved = []
+            try:
+                for src, dst in plan:
+                    rename_no_replace(src, dst)
+                    moved.append((src, dst))
+            except OSError as error:
+                recovered = True
+                for src, dst in reversed(moved):
+                    try:
+                        rename_no_replace(dst, src)
+                    except OSError:
+                        recovered = False
+                if not recovered:
+                    raise ValueError('移动中断，部分文件仍在目标分类。请停止整理；本机 data/moves 中保留了原位置和目标位置的恢复记录。') from error
+                journal.unlink()
+                raise ValueError('移动失败，已回退本次改动。请检查连接、写入权限和同名文件后重试。') from error
+            journal.unlink()
+            try:
+                self.scan()
+            except (OSError, ValueError, sqlite3.Error):
+                return {'folder': destination, 'message': '文件已移动，但重新读取失败。请确认连接后刷新书架。'}
+            return {'folder': destination, 'message': '图书及关联附件已移动。安全弹出后，等待 Kindle 重新索引。'}
+
     def import_notes(self, notes):
         batch = secrets.token_hex(8)
         added = 0
@@ -203,10 +308,15 @@ class Desk:
         with self.lock:
             if not self.connected():
                 return self.view()
-            warnings, books = [], []
+            warnings, books, folders = [], [], []
+            if any((self.data / 'moves').glob('*.json')):
+                warnings.append('发现未完成的移动记录，请先根据本机 data/moves 中的记录检查书籍及附件位置。')
             docs = self.device_path('documents')
             for parent, dirs, files in os.walk(docs):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and not d.endswith('.sdr') and not (Path(parent) / d).is_symlink()]
+                dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not d.lower().endswith('.sdr') and not (Path(parent) / d).is_symlink())
+                relative_folder = str(Path(parent).relative_to(docs))
+                relative_folder = '' if relative_folder == '.' else relative_folder
+                folders.append(relative_folder)
                 for name in sorted(files):
                     p = Path(parent) / name
                     if p.suffix.lower() not in FORMATS or 'clippings' in name.lower() or p.is_symlink():
@@ -215,7 +325,7 @@ class Desk:
                     stat = p.stat()
                     rel = str(p.relative_to(self.mount))
                     title = re.sub(r'_[A-Z0-9]{10,32}$', '', p.stem)
-                    books.append({'id': digest(rel), 'name': name, 'title': title, 'path': rel,
+                    books.append({'id': digest(rel), 'name': name, 'title': title, 'path': rel, 'folder': relative_folder,
                                   'format': p.suffix.lstrip('.').upper(), 'size': stat.st_size, 'modified': stat.st_mtime})
             added, clipping_found = 0, False
             for candidate in [docs / 'My Clippings.txt', docs / '我的剪贴.txt']:
@@ -236,7 +346,7 @@ class Desk:
             # Both sources are kept: their position systems differ, so automatic merging risks losing annotations.
             added += self.import_notes(database)
             usage = shutil.disk_usage(self.mount)
-            self.status = {'books': books, 'last_scan': time.time(), 'storage': {'total': usage.total, 'free': usage.free, 'used': usage.used},
+            self.status = {'books': books, 'folders': folders, 'last_scan': time.time(), 'storage': {'total': usage.total, 'free': usage.free, 'used': usage.used},
                            'warnings': list(dict.fromkeys(warnings)), 'added': added, 'clipping_found': clipping_found,
                            'annotation_stores': stores, 'database_records': len(database)}
             self.write_setting('snapshot', self.status)
@@ -255,7 +365,7 @@ class Desk:
                     'converter': bool(self.converter and Path(self.converter).is_file()), 'token': self.token, 'can_eject': self.can_eject,
                     'model': 'Kindle 11 · 2022', 'firmware': '5.19.2.0.1', 'last_export': self.read_setting('last_export')}
 
-    def send(self, source, name):
+    def send(self, source, name, folder=None):
         with self.lock:
             name = safe_name(name)
             ext = Path(name).suffix.lower()
@@ -272,12 +382,15 @@ class Desk:
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, env=env)
                     if proc.returncode or not output.is_file():
                         raise ValueError('EPUB 转换失败。请检查文件是否完整、是否受加密保护。')
-                    return self.copy_to_device(output, str(Path(name).with_suffix('.azw3')))
-            return self.copy_to_device(source, name)
+                    return self.copy_to_device(output, str(Path(name).with_suffix('.azw3')), folder)
+            return self.copy_to_device(source, name, folder)
 
-    def copy_to_device(self, source, name):
-        folder = self.device_path('documents/Kindle Desk')
-        folder.mkdir(exist_ok=True)
+    def copy_to_device(self, source, name, destination=None):
+        folder = self.folder_path('Kindle Desk' if destination is None else destination)
+        if destination is None:
+            folder.mkdir(exist_ok=True)
+        if not folder.is_dir():
+            raise ValueError('目标分类不存在，请刷新后重新选择。')
         target = contained(folder / safe_name(name), self.mount)
         if target.exists():
             raise ValueError('设备上已有同名文件。请更改文件名后重试；原文件未覆盖。')
@@ -387,6 +500,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, self.desk.scan())
             if path.path == '/api/eject':
                 return self.respond(200, self.desk.eject())
+            if path.path in {'/api/folders', '/api/move'}:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 16384:
+                    raise ValueError('分类请求为空或过大。')
+                self.connection.settimeout(10)
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('分类请求格式无效。')
+                if path.path == '/api/folders':
+                    return self.respond(200, self.desk.create_folder(payload.get('parent', ''), payload.get('name')))
+                return self.respond(200, self.desk.move_book(payload.get('id'), payload.get('folder')))
             if path.path == '/api/export':
                 notes = self.desk.view()['notes']
                 if not notes:
@@ -418,7 +542,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('未识别到摘录，请选择 Kindle 的 My Clippings.txt。')
                     added = self.desk.import_notes(notes)
                     return self.respond(200, {'added': added, 'skipped': skipped})
-                self.respond(200, self.desk.send(source, name))
+                folder = urllib.parse.parse_qs(path.query, keep_blank_values=True).get('folder', [None])[0]
+                self.respond(200, self.desk.send(source, name, folder))
         except (ValueError, UnicodeError) as e:
             self.respond(400, {'error': str(e)})
         except subprocess.TimeoutExpired:

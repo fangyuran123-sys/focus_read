@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
-from server import Desk, make_server, markdown_zip, parse_clippings
+from server import Desk, make_server, markdown_zip, parse_clippings, rename_no_replace
 
 CLIPPINGS = '\ufeff读书与生活 (作者)\n- 您在位置 #12-14的标注 | 添加于 2026年10月19日星期一 上午10:00:00\n\n这是第一段。\n这是第二行。\n==========\nReading (Author)\n- Your Note on Location 22 | Added on Monday, October 19, 2026 10:01:00 AM\n\nA note with <script>literal markup</script>.\n==========\n'
 
@@ -115,6 +115,149 @@ class DeskTest(unittest.TestCase):
             with self.assertRaises(ValueError): self.desk.eject()
             self.assertEqual(run.call_count,1)
 
+    def test_folders_are_real_nested_directories_and_cached_offline(self):
+        self.desk.create_folder('', '文学')
+        result = self.desk.create_folder('文学', '散文')
+        self.assertEqual(result['folder'], '文学/散文')
+        docs = self.mount / 'documents'
+        (docs / '.hidden').mkdir()
+        (docs / 'notes.SDR').mkdir()
+        (docs / 'link').symlink_to(self.root, target_is_directory=True)
+        source = self.root / 'book.txt'
+        source.write_text('正文')
+        self.desk.send(source, '随笔.txt', '文学/散文')
+        state = self.desk.scan()
+        self.assertEqual(state['folders'], ['', '文学', '文学/散文'])
+        self.assertEqual(state['books'][0]['folder'], '文学/散文')
+        self.assertEqual((docs / '文学/散文/随笔.txt').read_text(), '正文')
+        self.mount.rename(self.root / 'offline')
+        cached = Desk(self.mount, self.root / 'data', require_mount=False).view()
+        self.assertFalse(cached['connected'])
+        self.assertEqual(cached['folders'], state['folders'])
+        self.assertEqual(cached['books'], state['books'])
+
+    def test_invalid_folder_paths_collisions_and_symlinks_are_rejected(self):
+        docs = self.mount / 'documents'
+        self.desk.create_folder('', 'Tech')
+        for name in ['tech', '../outside', '/absolute', '.hidden', 'book.sdr', 'bad?', 'trailing.', '', None]:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.desk.create_folder('', name)
+        (docs / 'link').symlink_to(self.root, target_is_directory=True)
+        for parent in ['../', '/tmp', 'Tech//child', 'Tech/../', 'link', 'missing', None]:
+            with self.subTest(parent=parent), self.assertRaises(ValueError):
+                self.desk.create_folder(parent, 'Escape')
+        self.assertFalse((self.root / 'Escape').exists())
+        source = self.root / 'source.txt'
+        source.write_text('content')
+        for folder in ['../', 'link', 'missing', '.hidden']:
+            with self.subTest(folder=folder), self.assertRaises(ValueError):
+                self.desk.send(source, 'book.txt', folder)
+
+    def test_move_preserves_book_sidecars_and_notes(self):
+        docs = self.mount / 'documents'
+        source = docs / 'Book.kfx'
+        source.write_bytes(b'unchanged book')
+        (docs / 'Book.sdr/assets').mkdir(parents=True)
+        (docs / 'Book.sdr/assets/data.bin').write_bytes(b'unchanged notes')
+        (docs / 'Book.apnx').write_bytes(b'pages')
+        self.desk.import_notes(parse_clippings(CLIPPINGS)[0])
+        self.desk.create_folder('', '技术')
+        before = self.desk.view()['notes']
+        old_id = self.desk.status['books'][0]['id']
+        self.desk.move_book(old_id, '技术')
+        self.assertFalse(source.exists())
+        self.assertFalse((docs / 'Book.sdr').exists())
+        self.assertEqual((docs / '技术/Book.kfx').read_bytes(), b'unchanged book')
+        self.assertEqual((docs / '技术/Book.sdr/assets/data.bin').read_bytes(), b'unchanged notes')
+        self.assertEqual((docs / '技术/Book.apnx').read_bytes(), b'pages')
+        self.assertEqual(self.desk.view()['notes'], before)
+        book = self.desk.status['books'][0]
+        self.assertEqual(book['folder'], '技术')
+        self.assertNotEqual(old_id, book['id'])
+        self.desk.move_book(book['id'], '')
+        self.assertEqual(source.read_bytes(), b'unchanged book')
+        self.assertFalse(list((self.desk.data / 'moves').glob('*.json')))
+
+    def test_move_conflicts_stale_files_and_shared_sidecars_do_not_mutate(self):
+        docs = self.mount / 'documents'
+        source = docs / 'Book.azw3'
+        source.write_bytes(b'book')
+        (docs / 'Book.sdr').mkdir()
+        self.desk.create_folder('', 'Target')
+        book_id = self.desk.status['books'][0]['id']
+        conflict = docs / 'Target/book.sdr'
+        conflict.mkdir()
+        with self.assertRaisesRegex(ValueError, '同名'):
+            self.desk.move_book(book_id, 'Target')
+        self.assertTrue(source.exists())
+        self.assertTrue((docs / 'Book.sdr').exists())
+        conflict.rmdir()
+        (docs / 'Book.pdf').write_bytes(b'other format')
+        with self.assertRaisesRegex(ValueError, '共用附件'):
+            self.desk.move_book(book_id, 'Target')
+        (docs / 'Book.pdf').unlink()
+        source.write_bytes(b'external replacement')
+        with self.assertRaisesRegex(ValueError, '扫描后'):
+            self.desk.move_book(book_id, 'Target')
+        self.assertEqual(list((docs / 'Target').iterdir()), [])
+
+    def test_move_race_never_overwrites_and_rolls_back_sidecar(self):
+        docs = self.mount / 'documents'
+        source = docs / 'Book.azw3'
+        source.write_bytes(b'book')
+        (docs / 'Book.sdr').mkdir()
+        (docs / 'Book.sdr/note').write_text('saved note')
+        self.desk.create_folder('', 'Target')
+        def competing_move(src, dst):
+            if src == source:
+                dst.write_bytes(b'file created by another app')
+            rename_no_replace(src, dst)
+        with patch('server.rename_no_replace', side_effect=competing_move):
+            with self.assertRaisesRegex(ValueError, '回退'):
+                self.desk.move_book(self.desk.status['books'][0]['id'], 'Target')
+        self.assertEqual(source.read_bytes(), b'book')
+        self.assertEqual((docs / 'Target/Book.azw3').read_bytes(), b'file created by another app')
+        self.assertEqual((docs / 'Book.sdr/note').read_text(), 'saved note')
+        self.assertFalse(list((self.desk.data / 'moves').glob('*.json')))
+
+    def test_failed_rollback_keeps_recovery_plan_and_blocks_more_moves(self):
+        docs = self.mount / 'documents'
+        (docs / 'Book.azw3').write_bytes(b'book')
+        (docs / 'Book.sdr').mkdir()
+        self.desk.create_folder('', 'Target')
+        calls = 0
+        def disconnect(src, dst):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise OSError('device disconnected')
+            rename_no_replace(src, dst)
+        book_id = self.desk.status['books'][0]['id']
+        with patch('server.rename_no_replace', side_effect=disconnect):
+            with self.assertRaisesRegex(ValueError, '恢复记录'):
+                self.desk.move_book(book_id, 'Target')
+        records = list((self.desk.data / 'moves').glob('*.json'))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertEqual(record['moves'][0], {'from': 'documents/Book.sdr', 'to': 'documents/Target/Book.sdr'})
+        self.assertTrue((docs / 'Book.azw3').exists())
+        self.assertTrue((docs / 'Target/Book.sdr').exists())
+        with self.assertRaisesRegex(ValueError, '未完成'):
+            self.desk.move_book(book_id, 'Target')
+        self.assertTrue(any('未完成' in warning for warning in self.desk.scan()['warnings']))
+
+    def test_epub_conversion_keeps_selected_destination(self):
+        self.desk.create_folder('', '文学')
+        source = self.root / 'book.epub'
+        source.write_bytes(b'epub fixture')
+        self.desk.converter = '/test/ebook-convert'
+        def convert(args, **kwargs):
+            Path(args[2]).write_bytes(b'converted AZW3')
+            return type('Result', (), {'returncode': 0})()
+        with patch('server.subprocess.run', side_effect=convert):
+            self.desk.send(source, 'Book.epub', '文学')
+        self.assertEqual((self.mount / 'documents/文学/Book.azw3').read_bytes(), b'converted AZW3')
+
     def test_http_origin_token_and_export(self):
         self.desk.import_notes(parse_clippings(CLIPPINGS)[0])
         server = make_server(self.desk, 0)
@@ -135,6 +278,15 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(len(zipfile.ZipFile(io.BytesIO(body)).namelist()),2)
             self.assertEqual(request('POST','/api/upload?name=..%2Fbad.txt',headers,b'data')[0],400)
             self.assertEqual(request('GET','/../../etc/passwd')[0],404)
+            self.assertEqual(request('POST','/api/folders',body=b'{"name":"Tech"}')[0],403)
+            self.assertEqual(request('POST','/api/folders',headers,b'[]')[0],400)
+            self.assertEqual(request('POST','/api/folders',headers,b'{"name":"Tech"}')[0],200)
+            self.assertEqual(request('POST','/api/upload?name=book.txt&folder=Tech',headers,b'content')[0],200)
+            book = self.desk.status['books'][0]
+            self.assertEqual(book['folder'], 'Tech')
+            move = json.dumps({'id': book['id'], 'folder': ''}).encode()
+            self.assertEqual(request('POST','/api/move',headers,move)[0],200)
+            self.assertTrue((self.mount / 'documents/book.txt').is_file())
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
