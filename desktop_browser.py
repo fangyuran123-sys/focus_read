@@ -8,11 +8,11 @@ import time
 import uuid
 from urllib.parse import urlencode
 
-from PyQt6.QtCore import QLockFile, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import QLockFile, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
-from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                             QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
-                             QDialog, QDialogButtonBox, QListWidget, QComboBox)
+from PyQt6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                             QMessageBox, QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                             QWidget, QDialog, QDialogButtonBox, QListWidget, QComboBox)
 from PyQt6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,
                                    QWebEngineSettings, QWebEngineUrlRequestInterceptor)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -21,8 +21,65 @@ from desktop_downloads import (MAX_BOOK, MAX_IMAGE, IMAGE_TYPES, download_name, 
                                public_https, validate_book, validate_image, local_json, apply_downloaded_cover)
 
 BASE = Path(__file__).resolve().parent
-LIBRARY_URL = 'http://127.0.0.1:8765/'
+# embed=1 tells the library page to drop its own sidebar: this window owns navigation.
+LIBRARY_URL = 'http://127.0.0.1:8765/?embed=1'
 INKPAPER_URL = 'https://inkpaper.foolstack.net/'
+NAV_ITEMS = [
+    ('library', '我的图书馆', "changeView('library','')"),
+    ('reading', '阅读日历', "changeView('reading')"),
+    ('notes', '阅读摘录', "changeView('notes')"),
+    None,
+    ('device', 'Kindle', "changeView('device')"),
+    ('moaan', '墨案', "changeView('moaan')"),
+    None,
+    ('find', '找书 / Z-Library', None),
+    ('downloads', '下载管理', None),
+    ('covers', '封面 / 壁纸', None),
+]
+NAV_GROUPS = {'device': '设备', 'find': '在线'}
+PAGE_KEYS = {1: 'find', 2: 'downloads', 3: 'covers'}
+
+# Same tokens as web/library.css, so the native shell and the page inside it share one palette.
+STYLE = '''
+QWidget { color: #20231f; font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; }
+QMainWindow, QWidget#desktopPanel, QDialog { background: #eff0ec; }
+QWidget#desktopRail { background: #e9eae5; border-right: 1px solid #d8dad2; }
+QLabel#desktopBrand { font-size: 14px; font-weight: 600; color: #20231f; }
+QLabel#desktopBrandSub { font-size: 10px; color: #666b63; }
+QLabel#railHint { font-size: 10px; color: #8b9088; line-height: 170%; }
+
+QPushButton#navItem { background: transparent; border: 0; border-left: 3px solid transparent; border-radius: 0;
+    text-align: left; padding: 8px 10px 8px 13px; color: #666b63; font-size: 13px; }
+QPushButton#navItem:hover { background: rgba(0,0,0,0.04); color: #20231f; }
+QPushButton#navItem:checked { background: #fbfbf9; border-left: 3px solid #2c4a63; color: #20231f; font-weight: 600; }
+QFrame#railDivider { background: #d8dad2; border: 0; }
+
+QPushButton { background: #fbfbf9; border: 1px solid #d8dad2; border-radius: 6px; padding: 6px 12px; color: #3a3f39; }
+QPushButton:hover { border-color: #b9beb4; color: #20231f; }
+QPushButton:pressed { background: #e8e9e4; }
+QPushButton:disabled { color: #a8ada4; border-color: #e4e6df; background: #f4f5f1; }
+
+QLineEdit, QComboBox, QListWidget { background: #fbfbf9; border: 1px solid #d8dad2; border-radius: 6px;
+    padding: 6px 9px; selection-background-color: #2c4a63; selection-color: #ffffff; }
+QLineEdit:focus, QComboBox:focus, QListWidget:focus { border-color: #a9bfcd; }
+QLineEdit:read-only { color: #666b63; background: #e8e9e4; }
+
+QLabel { background: transparent; color: #666b63; }
+QLabel#panelTitle { font-size: 15px; font-weight: 600; color: #20231f; }
+
+QTableWidget { background: #fbfbf9; border: 1px solid #e4e6df; border-radius: 8px; gridline-color: transparent;
+    selection-background-color: #e6edf2; selection-color: #20231f; }
+QHeaderView::section { background: #fbfbf9; border: 0; border-bottom: 1px solid #d8dad2; padding: 8px 10px;
+    color: #666b63; font-size: 11px; font-weight: 600; }
+QTableWidget::item { padding: 8px 10px; border-bottom: 1px solid #e4e6df; }
+QTableCornerButton::section { background: #fbfbf9; border: 0; }
+
+QDialog { background: #eff0ec; }
+QSplitter::handle { background: #d8dad2; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: #c9cdc5; border-radius: 5px; min-height: 30px; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+'''
 
 
 class NetworkBoundary(QWebEngineUrlRequestInterceptor):
@@ -104,6 +161,7 @@ class DeskWindow(QMainWindow):
         self.cover_view = self.webview('inkpaper', False)
         self.cover_view.page().profile().downloadRequested.connect(lambda request: self.start_download(request, image=True))
         self.local_view.setUrl(QUrl(LIBRARY_URL))
+        self.local_view.loadFinished.connect(self.local_loaded)
         self.remote_view.urlChanged.connect(lambda url: self.address.setText(url.toString()))
         self.remote_view.loadFinished.connect(self.site_loaded)
         self.remote_view.page().profile().downloadRequested.connect(self.start_download)
@@ -111,33 +169,49 @@ class DeskWindow(QMainWindow):
         self.local_view.page().profile().downloadRequested.connect(self.save_local_download)
 
         shell = QWidget(); self.setCentralWidget(shell)
+        shell.setObjectName('desktopPanel')
         layout = QHBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
-        rail = QWidget(); rail.setFixedWidth(148)
+        rail = QWidget(); rail.setFixedWidth(178)
         rail.setObjectName('desktopRail')
-        nav = QVBoxLayout(rail); nav.setContentsMargins(14, 24, 14, 20); nav.setSpacing(12)
-        nav.addWidget(QLabel('Kindle Desk'))
+        nav = QVBoxLayout(rail); nav.setContentsMargins(0, 18, 0, 14); nav.setSpacing(1)
+
+        brand = QWidget(); brand_row = QHBoxLayout(brand)
+        brand_row.setContentsMargins(14, 0, 14, 0); brand_row.setSpacing(9)
+        mark = QLabel(); mark.setPixmap(QIcon(str(BASE / 'web/icon.svg')).pixmap(28, 28))
+        names = QVBoxLayout(); names.setSpacing(0)
+        title = QLabel('Kindle Desk'); title.setObjectName('desktopBrand')
+        subtitle = QLabel('个人图书馆'); subtitle.setObjectName('desktopBrandSub')
+        names.addWidget(title); names.addWidget(subtitle)
+        brand_row.addWidget(mark); brand_row.addLayout(names, 1)
+        nav.addWidget(brand)
+        nav.addSpacing(18)
+
         self.stack = QStackedWidget()
-        for label, index in [('我的图书馆', 0), ('找书 / Z-Library', 1), ('下载管理', 2), ('封面 / 壁纸', 3)]:
+        self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
+        self.nav_buttons = {}
+        self.local_nav = 'library'
+        self.local_ready = False
+        self.pending_script = None
+        for item in NAV_ITEMS:
+            if item is None:
+                continue
+            key, label, script = item
+            if key in NAV_GROUPS:
+                nav.addSpacing(12); nav.addWidget(self.rail_group(NAV_GROUPS[key]))
             button = QPushButton(label)
-            button.clicked.connect(lambda checked=False, i=index: self.show_view(i))
-            nav.addWidget(button)
+            button.setObjectName('navItem'); button.setCheckable(True); button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setChecked(key == 'library')
+            button.clicked.connect(lambda checked=False, k=key, s=script: self.show_nav(k, s))
+            self.nav_group.addButton(button); self.nav_buttons[key] = button; nav.addWidget(button)
         nav.addStretch()
-        hint = QLabel('网站与本机隔离\n下载后确认入库'); hint.setWordWrap(True); nav.addWidget(hint)
+        hint = QLabel('网站与本机隔离\n下载后确认入库'); hint.setWordWrap(True); hint.setObjectName('railHint')
+        hint.setContentsMargins(16, 0, 16, 0); nav.addWidget(hint)
         layout.addWidget(rail); layout.addWidget(self.stack, 1)
         self.stack.addWidget(self.local_view)
         self.stack.addWidget(self.browser_panel())
         self.stack.addWidget(self.download_panel())
         self.stack.addWidget(self.cover_panel())
-        self.setStyleSheet('''
-            QMainWindow, QWidget { background: #efede5; color: #23211b; }
-            QWidget#desktopRail { background: #e6e3d9; border-right: 1px solid #d9d2c4; }
-            QPushButton { background: #f8f6ef; border: 1px solid #d9d2c4; border-radius: 6px; padding: 9px; }
-            QPushButton:hover { background: #f2e7d3; }
-            QPushButton:disabled { color: #8b877e; }
-            QLineEdit { background: white; border: 1px solid #d9d2c4; border-radius: 6px; padding: 9px; }
-            QTableWidget { background: #f8f6ef; gridline-color: #d9d2c4; }
-            QLabel { background: transparent; }
-        ''')
+        self.setStyleSheet(STYLE)
         self.restore_downloads()
 
     def webview(self, name, local):
@@ -166,14 +240,16 @@ class DeskWindow(QMainWindow):
         return view
 
     def browser_panel(self):
-        panel = QWidget(); layout = QVBoxLayout(panel)
-        toolbar = QHBoxLayout()
+        panel = QWidget(); panel.setObjectName('desktopPanel'); layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(10)
+        toolbar = QHBoxLayout(); toolbar.setSpacing(6)
         for label, action in [('后退', self.remote_view.back), ('前进', self.remote_view.forward), ('刷新', self.remote_view.reload)]:
-            button = QPushButton(label); button.clicked.connect(action); toolbar.addWidget(button)
+            button = QPushButton(label); button.clicked.connect(action); button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(label + '当前网页'); toolbar.addWidget(button)
         self.address = QLineEdit(); self.address.setPlaceholderText('填写你确认的 HTTPS 书源地址，不预置镜像站')
         self.address.returnPressed.connect(self.open_site); toolbar.addWidget(self.address, 1)
-        go = QPushButton('打开'); go.clicked.connect(self.open_site); toolbar.addWidget(go)
-        save = QPushButton('设为书源首页'); save.clicked.connect(self.save_site); toolbar.addWidget(save)
+        go = QPushButton('打开'); go.clicked.connect(self.open_site); go.setCursor(Qt.CursorShape.PointingHandCursor); toolbar.addWidget(go)
+        save = QPushButton('设为书源首页'); save.clicked.connect(self.save_site); save.setCursor(Qt.CursorShape.PointingHandCursor); toolbar.addWidget(save)
         layout.addLayout(toolbar)
         self.site_status = QLabel('填写你信任的地址。请正常登录，仅下载你有权获取的内容；登录和验证码由你操作。')
         self.site_status.setWordWrap(True); layout.addWidget(self.site_status)
@@ -189,11 +265,13 @@ class DeskWindow(QMainWindow):
         return panel
 
     def cover_panel(self):
-        panel = QWidget(); layout = QVBoxLayout(panel)
-        toolbar = QHBoxLayout()
+        panel = QWidget(); panel.setObjectName('desktopPanel'); layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(10)
+        toolbar = QHBoxLayout(); toolbar.setSpacing(6)
         for label, action in [('后退', self.cover_view.back), ('前进', self.cover_view.forward), ('刷新', self.cover_view.reload),
                               ('InkPaper 首页', lambda: self.cover_view.setUrl(QUrl(INKPAPER_URL)))]:
-            button = QPushButton(label); button.clicked.connect(action); toolbar.addWidget(button)
+            button = QPushButton(label); button.clicked.connect(action); button.setCursor(Qt.CursorShape.PointingHandCursor)
+            toolbar.addWidget(button)
         self.cover_address = QLineEdit(); self.cover_address.setReadOnly(True)
         self.cover_address.setPlaceholderText(INKPAPER_URL)
         self.cover_view.urlChanged.connect(lambda url: self.cover_address.setText(url.toString()))
@@ -232,23 +310,76 @@ class DeskWindow(QMainWindow):
         self.site_status.setText('网站已加载。下载完成后到“下载管理”确认入库。' if success else
                                  '网页未能加载。请检查地址、网络或网站限制；本机/局域网和非 HTTPS 请求会被阻止。')
 
+    def rail_group(self, text):
+        """Thin rule + label, so each group reads as a block instead of one long list."""
+        row = QWidget(); line = QHBoxLayout(row)
+        line.setContentsMargins(16, 0, 14, 0); line.setSpacing(0)
+        label = QLabel(text)
+        label.setObjectName('desktopBrandSub')
+        line.addWidget(label)
+        rule = QFrame(); rule.setObjectName('railDivider'); rule.setFixedHeight(1)
+        line.addWidget(rule, 1)
+        row.setStyleSheet('QFrame#railDivider { background: #d8dad2; border: 0; }')
+        label.setContentsMargins(0, 0, 8, 2)
+        return row
+
     def show_view(self, index):
         self.stack.setCurrentIndex(index)
+        key = self.local_nav if index == 0 else PAGE_KEYS[index]
+        button = self.nav_buttons.get(key)
+        if button:
+            button.setChecked(True)
         if index == 1 and self.remote_view.url().isEmpty() and self.saved_site:
             self.address.setText(self.saved_site); self.open_site()
         elif index == 3 and self.cover_view.url().isEmpty():
             self.cover_view.setUrl(QUrl(INKPAPER_URL))
 
+    def show_nav(self, key, script=None):
+        """One sidebar for the whole app: online tools swap the stack, library sub-views swap inside the page."""
+        if key in PAGE_KEYS.values():
+            self.show_view(next(i for i, k in PAGE_KEYS.items() if k == key))
+            return
+        self.local_nav = key
+        self.show_view(0)
+        if not script:
+            return
+        if self.local_ready:
+            self.local_view.page().runJavaScript(script)
+        else:
+            self.pending_script = script
+
+    def local_loaded(self, ok):
+        if not ok:
+            # The page never arrived: do not leave a nav item lit for a view that is not on screen.
+            self.pending_script = None
+            self.local_nav = 'library'
+            button = self.nav_buttons.get('library')
+            if button:
+                button.setChecked(True)
+            return
+        self.local_ready = True
+        script, self.pending_script = self.pending_script, None
+        if script:
+            self.local_view.page().runJavaScript(script)
+
     def download_panel(self):
-        panel = QWidget(); layout = QVBoxLayout(panel)
-        title = QLabel('下载完成后，确认加入本地图书库'); layout.addWidget(title)
+        panel = QWidget(); panel.setObjectName('desktopPanel'); layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(8)
+        title = QLabel('下载完成后，确认加入本地图书库'); title.setObjectName('panelTitle'); layout.addWidget(title)
         self.download_hint = QLabel('电子书 ≤200 MiB；封面 JPEG/PNG ≤8 MiB、2000 万像素。完成后确认入库或选择图书补封面；失败文件不使用，下载原件保留。')
         self.download_hint.setWordWrap(True); layout.addWidget(self.download_hint)
+        layout.addSpacing(6)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(['文件', '状态', '操作'])
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setColumnWidth(0, 400); self.table.setColumnWidth(1, 300)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(44)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout.addWidget(self.table, 1)
         return panel
 
@@ -296,7 +427,7 @@ class DeskWindow(QMainWindow):
         download.receivedBytesChanged.connect(lambda: self.download_progress(download, row, limit))
         download.isFinishedChanged.connect(lambda: self.download_finished(download, row, path, image))
         download.accept()
-        self.stack.setCurrentIndex(2)
+        self.show_view(2)
 
     def download_progress(self, download, row, limit=MAX_BOOK):
         received = download.receivedBytes()

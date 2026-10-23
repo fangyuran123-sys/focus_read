@@ -1,5 +1,6 @@
 'use strict';
 const readingLabels = {want: '想读', reading: '在读', finished: '已读', paused: '搁置'};
+const NEXT_STATUS = {want: 'reading', reading: 'finished', finished: 'paused', paused: 'want'};
 let localPage = 1, localStatus = '', localResult = null, localSequence = 0;
 let currentBook = null, importTarget = null, coverTarget = null, libraryWorking = false, searchTimer, detailDirty = false, detailSequence = 0;
 
@@ -11,6 +12,14 @@ function applyWarmth(value) {
   $('warmth-value').textContent = level + '%';
 }
 try { applyWarmth(localStorage.getItem('desk-warmth') ?? 50); } catch { applyWarmth(50); }
+// The desktop shell has its own sidebar and hides this page's; keep the stats and the warmth slider by
+// moving them into the header strip instead of dropping them.
+if (new URLSearchParams(location.search).has('embed')) {
+  document.body.classList.add('embedded');
+  const extras = $('embed-extras');
+  extras.hidden = false;
+  extras.append(document.querySelector('.reading-stats'), document.querySelector('.warmth-control'));
+}
 $('warmth').oninput = () => {
   applyWarmth($('warmth').value);
   try { localStorage.setItem('desk-warmth', $('warmth').value); } catch { /* Storage may be disabled; the slider still works. */ }
@@ -29,12 +38,13 @@ function changeView(view, status = '') {
   $('reading-view').hidden = view !== 'reading';
   $('moaan-view').hidden = view !== 'moaan';
   $('library-actions').hidden = view !== 'library';
+  $('local-shelf').hidden = view !== 'library';
   $('device-actions').hidden = view === 'library' || view === 'moaan';
   $('device-view').classList.toggle('notes-only', view === 'notes');
   $('view-title').textContent = view === 'library' ? (readingLabels[status] || '我的图书馆') : view === 'moaan' ? '墨案设备' : view === 'reading' ? '阅读日历' : view === 'notes' ? '阅读摘录' : 'Kindle 设备';
   $('view-eyebrow').textContent = view === 'library' ? '个人图书馆' : view === 'reading' || view === 'notes' ? '阅读记录' : '设备连接';
   $('view-subtitle').textContent = view === 'library' ? (status ? '这个书架共有 ' + (localResult?.counts?.[status] || 0) + ' 本' : '想读的、在读的、读完的，都在这里。') : view === 'moaan' ? '墨案迷你阅，通过 MTP 连接你的本地图书馆。' : view === 'reading' ? '让每天的阅读，慢慢留下颜色。' : view === 'notes' ? '从 Kindle 导入的高亮、笔记和书签。' : '只在本机读取设备，不修改 Kindle 固件。';
-  document.querySelectorAll('.nav-item').forEach(button => {
+  document.querySelectorAll('.nav-item,.shelf-chip').forEach(button => {
     const active = button.dataset.view === view && (view !== 'library' || button.dataset.status === status);
     button.classList.toggle('active', active);
     if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -43,7 +53,7 @@ function changeView(view, status = '') {
   else if (view === 'moaan') loadMoaan();
   else { load(); if (view === 'reading') loadReading(); }
 }
-document.querySelectorAll('.nav-item').forEach(button => button.onclick = () => changeView(button.dataset.view, button.dataset.status || ''));
+document.querySelectorAll('.nav-item,.shelf-chip').forEach(button => button.onclick = () => changeView(button.dataset.view, button.dataset.status || ''));
 
 async function loadLibrary() {
   const sequence = ++localSequence;
@@ -66,8 +76,10 @@ async function loadLibrary() {
     $('local-summary').textContent = result.total + ' 本图书';
     $('local-books').replaceChildren();
     for (const book of result.books) {
-      const button = element('button', 'local-book');
-      button.type = 'button'; button.onclick = () => openBook(book.id);
+      const button = element('div', 'local-book');
+      button.setAttribute('role', 'button'); button.tabIndex = 0;
+      button.onclick = event => { if (!event.target.closest('.status-cycle')) openBook(book.id); };
+      button.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBook(book.id); } };
       button.setAttribute('aria-label', '查看 ' + book.title);
       const cover = element('div', 'local-cover cover-' + (parseInt(book.id.slice(0, 2), 16) % 5));
       cover.setAttribute('aria-hidden', 'true');
@@ -83,7 +95,12 @@ async function loadLibrary() {
       const info = element('div', 'local-book-info');
       info.append(element('h3', '', book.title), element('p', 'local-author', book.author || '作者待补充'));
       const meta = element('div', 'local-meta');
-      meta.append(element('span', 'reading-badge ' + book.status, readingLabels[book.status]), element('span', '', formats));
+      const shelf = element('button', 'reading-badge status-cycle ' + book.status, readingLabels[book.status]);
+      shelf.type = 'button';
+      shelf.title = '点击改为「' + readingLabels[NEXT_STATUS[book.status]] + '」';
+      shelf.setAttribute('aria-label', '把' + book.title + '改为' + readingLabels[NEXT_STATUS[book.status]]);
+      shelf.onclick = event => { event.stopPropagation(); cycleStatus(book); };
+      meta.append(shelf, element('span', '', formats));
       if (book.rating) meta.append(element('span', 'book-rating', '★'.repeat(book.rating)));
       info.append(meta);
       if (book.status === 'reading') {
@@ -115,6 +132,17 @@ async function loadLibrary() {
   }
 }
 $('local-search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { localPage = 1; loadLibrary(); }, 250); };
+// One click cycles the shelf from the card: the dialog stays for real edits. update() keeps progress/page/rating
+// unless sent, so the payload only needs the fields it validates plus the new status.
+async function cycleStatus(book) {
+  if (busy) return;
+  const status = NEXT_STATUS[book.status];
+  try {
+    await request('/api/library/update', JSON.stringify({id: book.id, title: book.title, tags: book.tags, status}));
+    toast('《' + book.title + '》已标记为' + readingLabels[status] + '。');
+    await loadLibrary();
+  } catch (error) { toast(error.message, true); }
+}
 $('local-tag').onchange = () => { localPage = 1; loadLibrary(); };
 $('local-sort').onchange = () => { localPage = 1; loadLibrary(); };
 $('local-rating').onchange = () => { localPage = 1; loadLibrary(); };

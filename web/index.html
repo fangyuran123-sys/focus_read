@@ -16,18 +16,14 @@
 <body>
   <div class="shell desktop-shell">
     <aside class="app-nav" aria-label="主导航">
-      <a href="/" class="brand" aria-label="Kindle Desk 首页"><span class="brand-mark" aria-hidden="true">k<span>·</span></span><span>Kindle Desk<small>PERSONAL LIBRARY</small></span></a>
-      <p class="nav-label">我的空间</p>
-      <button class="nav-item active" aria-current="page" data-view="library" data-status=""><span aria-hidden="true">▦</span>全部图书 <span id="local-total" class="nav-count">0</span></button>
+      <a href="/" class="brand" aria-label="Kindle Desk 首页"><span class="brand-mark" aria-hidden="true">k<span>·</span></span><span>Kindle Desk<small>个人图书馆</small></span></a>
+      <p class="nav-label">图书馆</p>
+      <button class="nav-item active" aria-current="page" data-view="library" data-status=""><span aria-hidden="true">▤</span>全部图书</button>
       <button class="nav-item" data-view="reading"><span aria-hidden="true">▦</span>阅读日历</button>
       <button class="nav-item" data-view="notes"><span aria-hidden="true">❞</span>阅读摘录</button>
-      <button class="nav-item" data-view="device"><span aria-hidden="true">▣</span>Kindle 设备</button>
-      <button class="nav-item" data-view="moaan"><span aria-hidden="true">▣</span>墨案设备</button>
-      <p class="nav-label">阅读书架</p>
-      <button class="nav-item" data-view="library" data-status="want"><span class="shelf-dot want"></span>想读 <span class="nav-count" id="count-want">0</span></button>
-      <button class="nav-item" data-view="library" data-status="reading"><span class="shelf-dot reading"></span>在读 <span class="nav-count" id="count-reading">0</span></button>
-      <button class="nav-item" data-view="library" data-status="finished"><span class="shelf-dot finished"></span>已读 <span class="nav-count" id="count-finished">0</span></button>
-      <button class="nav-item" data-view="library" data-status="paused"><span class="shelf-dot paused"></span>搁置 <span class="nav-count" id="count-paused">0</span></button>
+      <p class="nav-label">设备</p>
+      <button class="nav-item" data-view="device"><span aria-hidden="true">▣</span>Kindle</button>
+      <button class="nav-item" data-view="moaan"><span aria-hidden="true">▣</span>墨案</button>
       <section class="reading-stats" aria-labelledby="stats-heading"><h2 id="stats-heading">阅读记录</h2><p id="stats-year"></p><dl><div><dt>今年读完</dt><dd id="stats-finished-year">—</dd></div><div><dt>累计已读</dt><dd id="stats-finished">—</dd></div><div><dt>正在阅读</dt><dd id="stats-reading">—</dd></div><div><dt>归档摘录</dt><dd id="stats-notes">—</dd></div></dl><p class="stats-hint">今年读完按记录的完成日期统计</p></section>
       <label class="warmth-control" for="warmth">屏幕暖光 <output id="warmth-value" for="warmth">50%</output><input id="warmth" type="range" min="0" max="100" value="50"></label>
       <div class="nav-foot"><span class="dot"></span> 本地存储 · 无需账号<p>原文件留在电脑<br>让图书与阅读，慢慢积累。</p></div>
@@ -38,16 +34,17 @@
       <div class="app-header-actions" id="library-actions">
         <label class="search-box"><span aria-hidden="true">⌕</span><input id="local-search" type="search" placeholder="搜索书名或作者" aria-label="搜索本地图书书名或作者" maxlength="200"></label>
         <select id="local-tag" class="filter-select" aria-label="按标签筛选"><option value="">全部标签</option></select>
-        <button id="local-import" class="button primary" disabled><span aria-hidden="true">＋</span> 导入图书</button>
+        <button id="local-import" class="button primary" disabled>导入图书</button>
       </div>
-      <div class="app-header-actions" id="device-actions" hidden><span class="local-badge"><span class="dot"></span>数据留在本机</span><button id="refresh" class="button secondary"><span aria-hidden="true">↻</span> 刷新设备</button></div>
+      <div class="shelf-filter" id="local-shelf" role="group" aria-label="按阅读状态筛选"><button class="shelf-chip active" data-view="library" data-status="">全部 <span id="local-total">0</span></button><button class="shelf-chip" data-view="library" data-status="want">想读 <span id="count-want">0</span></button><button class="shelf-chip" data-view="library" data-status="reading">在读 <span id="count-reading">0</span></button><button class="shelf-chip" data-view="library" data-status="finished">已读 <span id="count-finished">0</span></button><button class="shelf-chip" data-view="library" data-status="paused">搁置 <span id="count-paused">0</span></button><div class="embed-extras" id="embed-extras" hidden></div></div>
+      <div class="app-header-actions" id="device-actions" hidden><span class="local-badge"><span class="dot"></span>数据留在本机</span><button id="refresh" class="button secondary">刷新设备</button></div>
     </header>
     <main id="local-view">
       <input id="local-file-input" type="file" accept=".epub,.pdf,.azw3,.azw,.mobi,.txt,.kfx,.prc" multiple hidden>
       <div class="library-status-line"><span id="local-summary" role="status">正在打开书库…</span><div class="library-filters"><select id="local-rating" class="link-select" aria-label="按最低评分筛选"><option value="0">全部评分</option><option value="5">5 星</option><option value="4">4 星及以上</option><option value="3">3 星及以上</option><option value="2">2 星及以上</option><option value="1">1 星及以上</option></select><select id="local-sort" class="link-select" aria-label="排序"><option value="recent">最近添加</option><option value="title">按书名</option><option value="author">按作者</option><option value="rating">评分从高到低</option></select></div></div>
       <div id="local-progress" class="notice" role="status" hidden></div>
       <div id="local-books" class="local-books" aria-label="本地图书"></div>
-      <div id="local-empty" class="local-empty" hidden><span aria-hidden="true">▤</span><h2>你的图书馆，从第一本书开始</h2><p>导入 EPUB、PDF 或 Kindle 图书文件。<br>原文件会复制到本地书库，不会移动或修改你的源文件。</p><button id="empty-import" class="button primary" disabled>导入第一本书</button></div>
+      <div id="local-empty" class="local-empty" hidden><h2>你的图书馆，从第一本书开始</h2><p>导入 EPUB、PDF 或 Kindle 图书文件。<br>原文件会复制到本地书库，不会移动或修改你的源文件。</p><button id="empty-import" class="button primary" disabled>导入第一本书</button></div>
       <div class="pagination" id="local-pagination" hidden><button id="local-prev" class="button secondary">上一页</button><span id="local-page"></span><button id="local-next" class="button secondary">下一页</button></div>
     </main>
     <main id="moaan-view" class="dashboard" hidden>

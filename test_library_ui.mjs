@@ -27,6 +27,7 @@ function setup() {
     $, element: makeElement, Option: function(text, value) { return {text, value}; },
     document: {querySelectorAll: () => [], addEventListener() {}, activeElement: null,
       documentElement: {style: {setProperty: (key, value) => styles.set(key, value)}}},
+    location: {search: ''},
     localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
     window: {addEventListener() {}},
     URLSearchParams, setTimeout, clearTimeout, state: {connected: false}, busy: false,
