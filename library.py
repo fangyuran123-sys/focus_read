@@ -267,8 +267,6 @@ class Library:
             if not isinstance(value, str) or len(value) > limit:
                 raise ValueError('书籍信息格式错误或内容过长。')
             values[key] = value.strip()
-        if not values['title']:
-            raise ValueError('书名不能为空。')
         status, tags = payload.get('status'), payload.get('tags')
         if not isinstance(status, str) or status not in STATUSES:
             raise ValueError('阅读状态无效。')
@@ -276,6 +274,12 @@ class Library:
             raise ValueError('最多 30 个标签，每个标签不超过 40 字。')
         with self.desk.lock:
             old = self.book(payload.get('id'))
+            # Omitted text fields keep their stored value, so a one-field update (e.g. only status) cannot erase them.
+            for key in values:
+                if key not in payload:
+                    values[key] = old[key]
+            if not values['title']:
+                raise ValueError('书名不能为空。')
             for key, limit in {'progress': 100, 'current_page': 1000000, 'rating': 5}.items():
                 value = payload.get(key, old[key])
                 if type(value) is not int or not 0 <= value <= limit:

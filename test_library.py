@@ -492,6 +492,13 @@ class LibraryTest(unittest.TestCase):
             self.assertEqual((status, body), (200, b'content'))
             book.update(author='Test author', tags=['tag'], status='finished', rating=4, current_page=120)
             self.assertEqual(request('POST', '/api/library/update', json.dumps(book), token)[0], 200)
+            # A one-field update (shelf click) must keep the text fields it did not send.
+            self.assertEqual(request('POST', '/api/library/update',
+                                      json.dumps({'id': book['id'], 'title': book['title'], 'tags': ['tag'], 'status': 'reading'}), token)[0], 200)
+            kept = json.loads(request('GET', '/api/library/book?id=' + book['id'])[1])
+            self.assertEqual((kept['author'], kept['status'], kept['current_page'], kept['rating']), ('Test author', 'reading', 120, 4))
+            book.update(status='finished')
+            self.assertEqual(request('POST', '/api/library/update', json.dumps(book), token)[0], 200)
             status, body = request('GET', '/api/library?q=Test&status=finished&tag=tag')
             self.assertEqual(json.loads(body)['total'], 1)
             self.assertEqual(request('GET', '/api/library?page=bad')[0], 409)
