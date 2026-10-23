@@ -29,6 +29,10 @@ FORMATS = {'.azw', '.azw3', '.mobi', '.pdf', '.txt', '.kfx', '.prc'}
 UPLOAD_FORMATS = {'.azw', '.azw3', '.mobi', '.pdf', '.txt', '.epub'}
 MAX_UPLOAD = 200 * 1024 * 1024
 SIDECARS = ('.sdr', '.mbp', '.mbp1', '.mbs', '.pdr', '.apnx', '.phl')
+STATIC = {'/': ('index.html', 'text/html; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'),
+          '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/library.js': ('library.js', 'text/javascript; charset=utf-8'),
+          '/library.css': ('library.css', 'text/css; charset=utf-8'), '/reading.js': ('reading.js', 'text/javascript; charset=utf-8'),
+          '/moaan.js': ('moaan.js', 'text/javascript; charset=utf-8'), '/icon.svg': ('icon.svg', 'image/svg+xml')}
 
 
 def digest(value):
@@ -519,6 +523,39 @@ class Handler(BaseHTTPRequestHandler):
     def desk(self):
         return self.server.desk
 
+    def arg(self, name, default=''):
+        """Query parameter; a present-but-empty value is '' (blank folder means device root)."""
+        return urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True).get(name, [default])[0]
+
+    def json_body(self, limit):
+        length = int(self.headers.get('Content-Length', '0'))
+        if not 0 < length <= limit:
+            raise ValueError('请求为空或过大。')
+        self.connection.settimeout(10)
+        payload = json.loads(self.rfile.read(length))
+        if not isinstance(payload, dict):
+            raise ValueError('请求格式无效。')
+        return payload
+
+    @contextmanager
+    def upload(self, limit, name='upload.bin', error=None):
+        """Stream the request body to a temp file that lives until this block exits."""
+        length = int(self.headers.get('Content-Length', '0'))
+        if not 0 < length <= limit:
+            raise ValueError(error or '文件为空或过大。书籍上限 200 MB，摘录上限 10 MB。')
+        with tempfile.TemporaryDirectory(dir=self.desk.data) as temp:
+            source = Path(temp) / name
+            remaining = length
+            self.connection.settimeout(30)
+            with source.open('xb') as out:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError('上传中断，请重试。')
+                    out.write(chunk)
+                    remaining -= len(chunk)
+            yield source
+
     def respond(self, code, body, content_type='application/json; charset=utf-8', filename=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False).encode('utf-8')
@@ -574,51 +611,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return
-        path = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.urlsplit(self.path).path
         try:
-            if path.path == '/api/moaan':
+            if path == '/api/moaan':
                 return self.respond(200, self.desk.moaan.view())
-            if path.path == '/api/moaan/file':
-                query = urllib.parse.parse_qs(path.query)
+            if path == '/api/moaan/file':
                 with self.desk.lock:
-                    book, source = self.desk.moaan.file(query.get('id', [''])[0])
+                    book, source = self.desk.moaan.file(self.arg('id'))
                     return self.download(source, book['name'])
-            if path.path == '/api/reading':
-                query = urllib.parse.parse_qs(path.query)
-                year = int(query['year'][0]) if 'year' in query else None
-                return self.respond(200, self.desk.reading_activity(year))
-            if path.path == '/api/library':
-                query = urllib.parse.parse_qs(path.query)
-                return self.respond(200, self.desk.library.listing(query.get('q', [''])[0], query.get('status', [''])[0],
-                                                                  query.get('tag', [''])[0], int(query.get('page', ['1'])[0]),
-                                                                  query.get('sort', ['recent'])[0], int(query.get('rating', ['0'])[0])))
-            if path.path == '/api/library/book':
-                query = urllib.parse.parse_qs(path.query)
-                return self.respond(200, self.desk.library.book(query.get('id', [''])[0]))
-            if path.path == '/api/cover':
-                query = urllib.parse.parse_qs(path.query)
-                cover = self.desk.library.cover_path(query.get('book', [''])[0])
+            if path == '/api/reading':
+                year = self.arg('year')
+                return self.respond(200, self.desk.reading_activity(int(year) if year else None))
+            if path == '/api/library':
+                return self.respond(200, self.desk.library.listing(self.arg('q'), self.arg('status'), self.arg('tag'),
+                                                                  int(self.arg('page', '1') or '1'), self.arg('sort', 'recent'),
+                                                                  int(self.arg('rating', '0') or '0')))
+            if path == '/api/library/book':
+                return self.respond(200, self.desk.library.book(self.arg('id')))
+            if path == '/api/cover':
+                cover = self.desk.library.cover_path(self.arg('book'))
                 if cover is None:
                     return self.respond(404, {'error': '这本书没有封面。'})
                 return self.image(cover.read_bytes())
-            if path.path == '/api/library/file':
-                query = urllib.parse.parse_qs(path.query)
-                info, source = self.desk.library.file(query.get('id', [''])[0])
+            if path == '/api/library/file':
+                info, source = self.desk.library.file(self.arg('id'))
                 return self.download(source, info['name'])
-            if path.path == '/api/state':
+            if path == '/api/state':
                 return self.respond(200, self.desk.view())
-            if path.path == '/api/book':
-                book_id = urllib.parse.parse_qs(path.query).get('id', [''])[0]
-                book = next((b for b in self.desk.status['books'] if b['id'] == book_id), None)
+            if path == '/api/book':
+                book = next((b for b in self.desk.status['books'] if b['id'] == self.arg('id')), None)
                 if not book:
                     return self.respond(404, {'error': '未找到该书籍，请重新扫描。'})
-                source = self.desk.device_path(book['path'])
-                return self.respond(200, source.read_bytes(), 'application/octet-stream', book['name'])
-            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'),
-                      '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/library.js': ('library.js', 'text/javascript; charset=utf-8'),
-                      '/library.css': ('library.css', 'text/css; charset=utf-8'), '/reading.js': ('reading.js', 'text/javascript; charset=utf-8'), '/moaan.js': ('moaan.js', 'text/javascript; charset=utf-8'), '/icon.svg': ('icon.svg', 'image/svg+xml')}
-            if path.path in static:
-                name, kind = static[path.path]
+                return self.respond(200, self.desk.device_path(book['path']).read_bytes(), 'application/octet-stream', book['name'])
+            if path in STATIC:
+                name, kind = STATIC[path]
                 return self.respond(200, (BASE / 'web' / name).read_bytes(), kind)
             self.respond(404, {'error': '页面不存在。'})
         except (OSError, ValueError, sqlite3.Error):
@@ -627,113 +653,67 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed(write=True):
             return
-        path = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.urlsplit(self.path).path
         try:
-            if path.path in {'/api/moaan/scan', '/api/moaan/import', '/api/moaan/send', '/api/moaan/folders'}:
-                length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    raise ValueError('墨案请求为空或过大。')
-                self.connection.settimeout(30)
-                payload = json.loads(self.rfile.read(length))
-                if not isinstance(payload, dict):
-                    raise ValueError('墨案请求格式无效。')
-                if path.path == '/api/moaan/scan':
+            if path in {'/api/moaan/scan', '/api/moaan/import', '/api/moaan/send', '/api/moaan/folders'}:
+                payload = self.json_body(16384)
+                if path == '/api/moaan/scan':
                     return self.respond(200, self.desk.moaan.scan(payload.get('folder', '')))
-                if path.path == '/api/moaan/folders':
+                if path == '/api/moaan/folders':
                     return self.respond(200, self.desk.moaan.create_folder(payload.get('parent', ''), payload.get('name'), payload.get('device_id')))
                 if not isinstance(payload.get('id'), str):
                     raise ValueError('墨案图书标识无效。')
-                if path.path == '/api/moaan/import':
+                if path == '/api/moaan/import':
                     return self.respond(200, self.desk.moaan.import_book(payload['id']))
                 return self.respond(200, self.desk.moaan.send(payload['id'], payload.get('folder'), payload.get('device_id')))
-            if path.path == '/api/scan':
+            if path == '/api/scan':
                 return self.respond(200, self.desk.scan())
-            if path.path == '/api/eject':
+            if path == '/api/eject':
                 return self.respond(200, self.desk.eject())
-            if path.path == '/api/library/cover':
-                query = urllib.parse.parse_qs(path.query)
-                file_id = query.get('id', [''])[0]
-                generate = query.get('generate', ['0'])[0]
-                length = int(self.headers.get('Content-Length', '0'))
-                if generate == '1' and length == 0:
+            if path == '/api/library/cover':
+                file_id, generate = self.arg('id'), self.arg('generate', '0')
+                if generate == '1' and self.headers.get('Content-Length', '0') == '0':
                     return self.respond(200, self.desk.library.apply_cover(file_id))
-                if generate != '0' or not 0 < length <= 8 * 1024 * 1024:
+                if generate != '0':
                     raise ValueError('请选择最多 8 MiB 的 JPEG/PNG，或使用自动生成封面。')
-                self.connection.settimeout(30)
-                with tempfile.TemporaryDirectory(dir=self.desk.data) as temp:
-                    image = Path(temp) / 'upload.image'
-                    remaining = length
-                    with image.open('xb') as out:
-                        while remaining:
-                            chunk = self.rfile.read(min(1024 * 1024, remaining))
-                            if not chunk:
-                                raise ValueError('封面上传中断，请重试。')
-                            out.write(chunk)
-                            remaining -= len(chunk)
+                with self.upload(8 * 1024 * 1024, 'upload.image', '请选择最多 8 MiB 的 JPEG/PNG，或使用自动生成封面。') as image:
                     return self.respond(200, self.desk.library.apply_cover(file_id, image))
-            if path.path in {'/api/library/update', '/api/library/send', '/api/library/delete'}:
-                length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 131072:
-                    raise ValueError('请求为空或过大。')
-                self.connection.settimeout(10)
-                payload = json.loads(self.rfile.read(length))
-                if not isinstance(payload, dict) or not isinstance(payload.get('id'), str):
+            if path in {'/api/library/update', '/api/library/send', '/api/library/delete'}:
+                payload = self.json_body(131072)
+                if not isinstance(payload.get('id'), str):
                     raise ValueError('图书请求格式无效。')
-                if path.path == '/api/library/update':
+                if path == '/api/library/update':
                     return self.respond(200, self.desk.library.update(payload))
-                if path.path == '/api/library/delete':
+                if path == '/api/library/delete':
                     return self.respond(200, self.desk.library.delete(payload['id'], payload.get('delete_files', False)))
                 return self.respond(200, self.desk.library.send(payload['id'], payload.get('folder')))
-            if path.path in {'/api/folders', '/api/move'}:
-                length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    raise ValueError('分类请求为空或过大。')
-                self.connection.settimeout(10)
-                payload = json.loads(self.rfile.read(length))
-                if not isinstance(payload, dict):
-                    raise ValueError('分类请求格式无效。')
-                if path.path == '/api/folders':
+            if path in {'/api/folders', '/api/move'}:
+                payload = self.json_body(16384)
+                if path == '/api/folders':
                     return self.respond(200, self.desk.create_folder(payload.get('parent', ''), payload.get('name')))
                 return self.respond(200, self.desk.move_book(payload.get('id'), payload.get('folder')))
-            if path.path == '/api/export':
+            if path == '/api/export':
                 notes = self.desk.view()['notes']
                 if not notes:
                     raise ValueError('还没有可导出的摘录。')
                 data = markdown_zip(notes)
                 self.desk.write_setting('last_export', time.time())
                 return self.respond(200, data, 'application/zip', 'Kindle摘录.zip')
-            if path.path not in {'/api/upload', '/api/import', '/api/library/import', '/api/moaan/upload'}:
+            if path not in {'/api/upload', '/api/import', '/api/library/import', '/api/moaan/upload'}:
                 return self.respond(404, {'error': '操作不存在。'})
-            length = int(self.headers.get('Content-Length', '0'))
-            limit = 10 * 1024 * 1024 if path.path == '/api/import' else MAX_UPLOAD
-            if not 0 < length <= limit:
-                raise ValueError('文件为空或过大。书籍上限 200 MB，摘录上限 10 MB。')
-            name = safe_name(urllib.parse.parse_qs(path.query).get('name', [''])[0])
-            with tempfile.TemporaryDirectory(dir=self.desk.data) as temp:
-                source = Path(temp) / name
-                remaining = length
-                self.connection.settimeout(30)
-                with source.open('xb') as out:
-                    while remaining:
-                        chunk = self.rfile.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            raise ValueError('文件上传中断，请重试。')
-                        out.write(chunk)
-                        remaining -= len(chunk)
-                if path.path == '/api/moaan/upload':
-                    query = urllib.parse.parse_qs(path.query)
-                    return self.respond(200, self.desk.moaan.copy_to_device(source, name, query.get('folder', [''])[0], query.get('device_id', [''])[0]))
-                if path.path == '/api/import':
+            name = safe_name(self.arg('name'))
+            with self.upload(10 * 1024 * 1024 if path == '/api/import' else MAX_UPLOAD, name) as source:
+                if path == '/api/moaan/upload':
+                    return self.respond(200, self.desk.moaan.copy_to_device(source, name, self.arg('folder'), self.arg('device_id')))
+                if path == '/api/import':
                     notes, skipped = parse_clippings(source.read_text(encoding='utf-8-sig'))
                     if not notes:
                         raise ValueError('未识别到摘录，请选择 Kindle 的 My Clippings.txt。')
-                    added = self.desk.import_notes(notes)
-                    return self.respond(200, {'added': added, 'skipped': skipped})
-                if path.path == '/api/library/import':
-                    book_id = urllib.parse.parse_qs(path.query).get('book', [None])[0]
-                    return self.respond(200, self.desk.library.import_file(source, name, book_id))
-                folder = urllib.parse.parse_qs(path.query, keep_blank_values=True).get('folder', [None])[0]
-                self.respond(200, self.desk.send(source, name, folder))
+                    return self.respond(200, {'added': self.desk.import_notes(notes), 'skipped': skipped})
+                if path == '/api/library/import':
+                    return self.respond(200, self.desk.library.import_file(source, name, self.arg('book', None)))
+                # A blank folder= means the device root; an absent one means the default folder.
+                self.respond(200, self.desk.send(source, name, self.arg('folder', None)))
         except (ValueError, UnicodeError) as e:
             self.respond(400, {'error': str(e)})
         except subprocess.TimeoutExpired:
