@@ -118,9 +118,10 @@ function render() {
   $('refresh').disabled=busy; $('import-notes').disabled=busy;
   $('eject').disabled=!state.connected||busy||state.can_eject===false;
   $('eject').title=state.can_eject===false?'容器模式：停止容器后，在宿主机文件管理器安全弹出 Kindle。':'';
+  window.dispatchEvent(new Event('desk-state'));
 }
 async function load(scan=false,notify=false){
-  try{let next=await request(scan?'/api/scan':'/api/state',scan?'':undefined);if(!scan&&state&&!state.connected&&next.connected)next=await request('/api/scan','');state=next;render();if(notify)toast(state.connected?'读取完成。'+(state.added?'新增 '+state.added+' 条摘录。':''):'Kindle 未连接，正在显示本地缓存。');}
+  try{let next=await request(scan?'/api/scan':'/api/state',scan?'':undefined);if(!scan&&state&&!state.connected&&next.connected)next=await request('/api/scan','');state=next;render();if(notify)toast(state.connected?'读取完成。'+(state.added?'新增 '+state.added+' 条摘录。':'')+(state.reading_added?'新增 '+state.reading_added+' 条阅读会话。':''):'Kindle 未连接，正在显示本地缓存。');}
   catch(error){toast(error.message,true);}
 }
 $('refresh').onclick=async()=>{if(busy)return; $('refresh').disabled=true; await load(true,true);$('refresh').disabled=false;};
@@ -158,4 +159,4 @@ $('send').onclick=async()=>{
   finally{busy=false;$('dropzone').disabled=false;$('cancel-files').disabled=false;await load();}
 };
 load();
-setInterval(()=>{if(!busy&&!document.hidden&&!$('folder-dialog').open)load();},15000);
+setInterval(()=>{if(!busy&&!document.hidden&&!$('folder-dialog').open&&!$('book-dialog').open&&!$('device-view').hidden)load();},15000);

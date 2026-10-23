@@ -4,17 +4,111 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Kindle Desk · 本地阅读空间</title>
+  <title>Kindle Desk · 个人图书馆</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/library.css">
   <script src="/app.js" defer></script>
+  <script src="/library.js" defer></script>
+  <script src="/reading.js" defer></script>
+  <script src="/moaan.js" defer></script>
 </head>
 <body>
-  <div class="shell">
-    <header class="topbar">
-      <a href="/" class="brand" aria-label="Kindle Desk 首页"><span class="brand-mark" aria-hidden="true">k<span>·</span></span><span>Kindle Desk<small>本地阅读空间</small></span></a>
-      <div class="top-actions"><span class="local-badge"><span class="dot"></span>数据留在本机</span><button id="refresh" class="button secondary"><span aria-hidden="true">↻</span> 刷新设备</button></div>
+  <div class="shell desktop-shell">
+    <aside class="app-nav" aria-label="主导航">
+      <a href="/" class="brand" aria-label="Kindle Desk 首页"><span class="brand-mark" aria-hidden="true">k<span>·</span></span><span>Kindle Desk<small>PERSONAL LIBRARY</small></span></a>
+      <p class="nav-label">我的空间</p>
+      <button class="nav-item active" aria-current="page" data-view="library" data-status=""><span aria-hidden="true">▦</span>全部图书 <span id="local-total" class="nav-count">0</span></button>
+      <button class="nav-item" data-view="reading"><span aria-hidden="true">▦</span>阅读日历</button>
+      <button class="nav-item" data-view="notes"><span aria-hidden="true">❞</span>阅读摘录</button>
+      <button class="nav-item" data-view="device"><span aria-hidden="true">▣</span>Kindle 设备</button>
+      <button class="nav-item" data-view="moaan"><span aria-hidden="true">▣</span>墨案设备</button>
+      <p class="nav-label">阅读书架</p>
+      <button class="nav-item" data-view="library" data-status="want"><span class="shelf-dot want"></span>想读 <span class="nav-count" id="count-want">0</span></button>
+      <button class="nav-item" data-view="library" data-status="reading"><span class="shelf-dot reading"></span>在读 <span class="nav-count" id="count-reading">0</span></button>
+      <button class="nav-item" data-view="library" data-status="finished"><span class="shelf-dot finished"></span>已读 <span class="nav-count" id="count-finished">0</span></button>
+      <button class="nav-item" data-view="library" data-status="paused"><span class="shelf-dot paused"></span>搁置 <span class="nav-count" id="count-paused">0</span></button>
+      <section class="reading-stats" aria-labelledby="stats-heading"><h2 id="stats-heading">阅读记录</h2><p id="stats-year"></p><dl><div><dt>今年读完</dt><dd id="stats-finished-year">—</dd></div><div><dt>累计已读</dt><dd id="stats-finished">—</dd></div><div><dt>正在阅读</dt><dd id="stats-reading">—</dd></div><div><dt>归档摘录</dt><dd id="stats-notes">—</dd></div></dl><p class="stats-hint">今年读完按记录的完成日期统计</p></section>
+      <label class="warmth-control" for="warmth">屏幕暖光 <output id="warmth-value" for="warmth">50%</output><input id="warmth" type="range" min="0" max="100" value="50"></label>
+      <div class="nav-foot"><span class="dot"></span> 本地存储 · 无需账号<p>原文件留在电脑<br>让图书与阅读，慢慢积累。</p></div>
+    </aside>
+    <div class="app-main">
+    <header class="app-header">
+      <div class="app-title"><p class="eyebrow" id="view-eyebrow">个人图书馆</p><h1 id="view-title">我的图书馆</h1><p class="app-subtitle" id="view-subtitle">想读的、在读的、读完的，都在这里。</p></div>
+      <div class="app-header-actions" id="library-actions">
+        <label class="search-box"><span aria-hidden="true">⌕</span><input id="local-search" type="search" placeholder="搜索书名或作者" aria-label="搜索本地图书书名或作者" maxlength="200"></label>
+        <select id="local-tag" class="filter-select" aria-label="按标签筛选"><option value="">全部标签</option></select>
+        <button id="local-import" class="button primary" disabled><span aria-hidden="true">＋</span> 导入图书</button>
+      </div>
+      <div class="app-header-actions" id="device-actions" hidden><span class="local-badge"><span class="dot"></span>数据留在本机</span><button id="refresh" class="button secondary"><span aria-hidden="true">↻</span> 刷新设备</button></div>
     </header>
-    <main class="dashboard">
+    <main id="local-view">
+      <input id="local-file-input" type="file" accept=".epub,.pdf,.azw3,.azw,.mobi,.txt,.kfx,.prc" multiple hidden>
+      <div class="library-status-line"><span id="local-summary" role="status">正在打开书库…</span><div class="library-filters"><select id="local-rating" class="link-select" aria-label="按最低评分筛选"><option value="0">全部评分</option><option value="5">5 星</option><option value="4">4 星及以上</option><option value="3">3 星及以上</option><option value="2">2 星及以上</option><option value="1">1 星及以上</option></select><select id="local-sort" class="link-select" aria-label="排序"><option value="recent">最近添加</option><option value="title">按书名</option><option value="author">按作者</option><option value="rating">评分从高到低</option></select></div></div>
+      <div id="local-progress" class="notice" role="status" hidden></div>
+      <div id="local-books" class="local-books" aria-label="本地图书"></div>
+      <div id="local-empty" class="local-empty" hidden><span aria-hidden="true">▤</span><h2>你的图书馆，从第一本书开始</h2><p>导入 EPUB、PDF 或 Kindle 图书文件。<br>原文件会复制到本地书库，不会移动或修改你的源文件。</p><button id="empty-import" class="button primary" disabled>导入第一本书</button></div>
+      <div class="pagination" id="local-pagination" hidden><button id="local-prev" class="button secondary">上一页</button><span id="local-page"></span><button id="local-next" class="button secondary">下一页</button></div>
+    </main>
+    <main id="moaan-view" class="dashboard" hidden>
+      <aside class="device-column">
+        <section class="card device-card" aria-labelledby="moaan-heading">
+          <div class="device-heading"><div><p class="eyebrow">我的阅读器</p><h1 id="moaan-heading">墨案迷你阅</h1><p class="muted small">EPD105 / MTP 文件传输</p></div><span id="moaan-connection" class="status-pill offline">未连接</span></div>
+          <div class="reader-scene moaan-scene" aria-hidden="true"><div class="reader moaan-reader"><div class="reader-screen"><div class="screen-top"><span>墨案迷你阅</span><span>•••</span></div><div class="screen-page"><span class="page-rule"></span><p class="screen-kicker">设备上的书</p><div id="moaan-screen-title" class="moaan-screen-title">你的下一本书</div><span class="page-rule short"></span><p class="moaan-screen-subtitle">把阅读留在日常</p></div><div class="screen-bottom"><span>当前目录</span><span id="moaan-screen-count">—</span></div></div><span class="reader-logo">moaan</span></div><div class="cable"></div></div>
+          <div class="device-foot"><span class="dot" id="moaan-dot"></span><span id="moaan-connection-detail">等待连接</span></div>
+        </section>
+        <section class="card storage-card" aria-label="墨案存储与读取信息">
+          <div class="storage-heading"><span class="muted">可用存储</span><span id="moaan-storage-total" class="tiny">连接后读取</span></div>
+          <div class="storage-value"><strong id="moaan-storage-free">—</strong><span>GiB</span></div>
+          <div class="meter" aria-label="墨案存储已使用比例"><span id="moaan-storage-bar"></span></div>
+          <div class="stat-grid"><div><span class="muted">当前目录图书</span><strong id="moaan-book-count">—</strong></div><div><span class="muted">子目录</span><strong id="moaan-folder-count">—</strong></div></div>
+          <div class="sync-line"><span class="muted">上次读取</span><time id="moaan-last-scan">尚未读取</time></div>
+        </section>
+        <p class="aside-note">解锁后选择文件传输，在系统文件管理器打开内部存储。<br>传输完成前不要拔线；断开请使用系统文件管理器。</p>
+      </aside>
+      <div class="content-column">
+        <section class="card moaan-records-card" aria-labelledby="moaan-records-heading">
+          <div class="section-heading"><h2 id="moaan-records-heading">阅读积累</h2><button id="moaan-refresh" class="button secondary">刷新墨案</button></div>
+          <p id="moaan-summary" class="reading-history" role="status">正在识别设备…</p>
+          <div class="moaan-capability"><h3>阅读时长与热力图</h3><p id="moaan-reading">尚未导入墨案阅读时长。设备有统计功能，不一定代表 MTP 能访问它的数据库。</p></div>
+          <div class="moaan-capability"><h3>阅读摘录</h3><p>当前未接通墨案阅读 App 的摘录格式，不会把 Kindle 摘录当作墨案数据。请提供阅读 App 名称及其导出样例，以便接入。</p></div>
+          <p id="moaan-error" class="folder-error" role="alert" hidden></p>
+        </section>
+        <div class="bottom-grid">
+          <section class="card transfer-card" aria-labelledby="moaan-transfer-heading">
+            <div class="section-heading"><h2 id="moaan-transfer-heading">传入墨案</h2><span class="tiny">EPUB · PDF · TXT</span></div>
+            <button id="moaan-dropzone" class="dropzone" disabled><svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><path d="M18 5v19m-7-7 7 7 7-7M7 25v6h22v-6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><strong>把书拖到这里</strong><span>或点击选择文件</span><small>EPUB 直接发送，不转换</small></button>
+            <input id="moaan-file-input" type="file" accept=".epub,.pdf,.txt" multiple hidden>
+            <p id="moaan-send-path" class="folder-path">先在设备书架选择目标目录</p>
+            <div id="moaan-pending" class="pending" hidden><div id="moaan-pending-list"></div><button id="moaan-send" class="button primary">传入墨案</button><button id="moaan-cancel-files" class="text-button">取消</button></div>
+            <p id="moaan-transfer-state" class="transfer-state" role="status" hidden></p>
+            <div id="moaan-transfer-history" class="transfer-history"></div>
+          </section>
+          <section class="card library-card" aria-labelledby="moaan-library-heading">
+            <div class="section-heading"><h2 id="moaan-library-heading">设备书架</h2><span id="moaan-library-count" class="tiny">—</span></div>
+            <nav class="moaan-folder-bar" aria-label="墨案目录"><button id="moaan-up" class="button secondary" disabled>上一级</button><button id="moaan-new-folder" class="text-button" disabled>＋ 新建分类</button></nav>
+            <p id="moaan-path" class="folder-path">内部存储</p>
+            <div id="moaan-folders" class="moaan-folders" aria-label="子目录"></div>
+            <div id="moaan-books" class="moaan-books" aria-label="墨案图书"></div>
+            <p class="reading-history">分类直接对应文件夹，不修改阅读 App 内的书架。支持下载、复制导入；不提供移动或删除设备原书。</p>
+          </section>
+        </div>
+      </div>
+    </main>
+    <main id="reading-view" hidden>
+      <section class="reading-calendar" aria-labelledby="reading-heading">
+        <div class="section-heading"><div><h2 id="reading-heading">每一天的阅读痕迹</h2><p id="reading-summary" role="status">正在读取阅读会话…</p></div><select id="reading-year" class="filter-select" aria-label="阅读日历年份"></select></div>
+        <p class="reading-method">Kindle 已结束的阅读会话时长，按电脑本地时区分天；不等同于有效阅读时长。空格表示没有已导入会话，不代表当天没读。</p>
+        <div class="heatmap-scroll" tabindex="0" role="region" aria-label="全年阅读热力图，可横向滚动"><div class="heatmap-months" id="heatmap-months" aria-hidden="true"></div><div class="heatmap-body"><div class="heatmap-weekdays" aria-hidden="true"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div id="reading-heatmap" class="reading-heatmap" role="group" aria-label="按周排列，周一至周日"></div></div></div>
+        <div class="heatmap-legend"><span>无记录</span><i class="heat-level-0"></i><i class="heat-level-1"></i><span>&lt;15 分</span><i class="heat-level-2"></i><span>15–30 分</span><i class="heat-level-3"></i><span>30–60 分</span><i class="heat-level-4"></i><span>≥60 分</span></div>
+        <p id="reading-day" class="reading-day" role="status">选择一个日期，查看当天记录。</p>
+        <p id="reading-history" class="reading-history"></p>
+        <p id="reading-empty" class="reading-empty" hidden>还没有可用会话。连接 Kindle 后点击“刷新设备”。设备缓存可能已被清理，无法补回没有保留的历史。</p>
+        <p id="reading-error" class="folder-error" role="alert" hidden></p>
+        <p class="reading-history">来源：Kindle 统计缓存。连接后刷新导入，重复刷新不会累加；断开后仍可查看。设备可能清理缓存，建议定期导入。</p>
+      </section>
+    </main>
+    <main class="dashboard" id="device-view" hidden>
       <aside class="device-column">
         <section class="card device-card" aria-labelledby="device-title">
           <div class="device-heading"><div><p class="eyebrow">我的阅读器</p><h1 id="device-title">Kindle</h1><p class="muted" id="device-model">第 11 代 · 2022</p></div><span id="connection" class="status-pill">读取中</span></div>
@@ -30,7 +124,7 @@
           <div class="stat-grid"><div><span class="muted">设备书籍</span><strong id="book-count">—</strong></div><div><span class="muted">本地摘录</span><strong id="note-count">—</strong></div></div>
           <div class="sync-line"><span class="muted">上次读取</span><time id="last-scan">尚未读取</time></div>
         </section>
-        <p class="aside-note">书籍与摘录保存在这台电脑。<br>Kindle 拔出后，仍可查看已导入的内容。</p>
+        <p class="aside-note">这里展示 Kindle 的设备书架快照。<br>原文件仍在设备；如需本地保存，请下载后导入本地书库。</p>
       </aside>
       <div class="content-column">
         <section class="card notes-card" aria-labelledby="notes-heading">
@@ -61,8 +155,31 @@
         </div>
       </div>
     </main>
-    <footer class="page-footer"><span>Kindle Desk <span class="version">/ 本地版 0.2</span></span><span>离线可用 · 无需登录</span></footer>
+    <footer class="page-footer"><span>Kindle Desk <span class="version">/ 个人图书馆预览版</span></span><span>本地优先 · 原件保留</span></footer>
+    </div>
   </div>
+  <dialog id="book-dialog" aria-labelledby="book-detail-title">
+    <div class="detail-heading">
+      <div class="detail-cover" id="detail-cover" aria-hidden="true"><img id="detail-cover-img" alt=""><span id="detail-cover-fallback">▤</span></div>
+      <div class="detail-title-block"><p class="eyebrow">书籍详情</p><h2 id="book-detail-title">书籍详情</h2><p class="detail-byline" id="detail-byline"></p></div>
+      <button id="book-close" class="icon-button" aria-label="关闭书籍详情">✕</button>
+    </div>
+    <form id="book-form">
+      <input id="detail-id" type="hidden">
+      <div class="detail-body">
+        <div class="detail-fields"><label>书名<input id="detail-title" required maxlength="300"></label><label>作者<input id="detail-author" maxlength="300" placeholder="添加作者"></label></div>
+        <div class="detail-fields"><label>阅读状态<select id="detail-status"><option value="want">想读</option><option value="reading">在读</option><option value="finished">已读</option><option value="paused">搁置</option></select></label><label>标签<input id="detail-tags" maxlength="1229" placeholder="用逗号分隔，例如：文学, 散文"></label></div>
+        <div class="detail-reading"><label for="detail-progress">阅读进度 <output id="detail-progress-value" for="detail-progress">0%</output><input id="detail-progress" type="range" min="0" max="100" value="0"></label><label>当前页码<input id="detail-current_page" type="number" min="0" max="1000000" step="1" value="0"></label><label>我的评分<select id="detail-rating"><option value="0">未评分</option><option value="1">★ 1 星</option><option value="2">★★ 2 星</option><option value="3">★★★ 3 星</option><option value="4">★★★★ 4 星</option><option value="5">★★★★★ 5 星</option></select></label></div>
+        <p class="detail-hint reading-hint">手动记录，不与 Kindle 进度同步；标记已读时进度设为 100%。</p>
+        <label>简介<textarea id="detail-description" maxlength="10000" rows="3" placeholder="这本书讲了什么…"></textarea></label>
+        <label>我的阅读笔记<textarea id="detail-review" maxlength="20000" rows="4" placeholder="读到哪里，有什么感受，写给未来的自己。"></textarea></label>
+        <section class="detail-files"><div class="section-heading"><h3>文件与设备</h3><button id="add-format" type="button" class="text-button">＋ 添加其他格式</button></div><p class="detail-hint">同一本书可以保留多个格式。不同版本或译本建议单独建书。</p><p class="detail-hint">补封面：上传 JPEG/PNG（≤8 MiB），或用已保存的书名、作者生成。直接更新所选书库文件，不新增版本；EPUB/AZW3/MOBI 保持格式，TXT/AZW 将替换为 AZW3。下载源文件及设备旧书不变，PDF/KFX/PRC 不支持。</p><input id="cover-file-input" type="file" accept="image/jpeg,image/png" hidden><label class="folder-field">发送到 Kindle 的目录<select id="local-send-folder"><option value="*">Kindle Desk（默认目录）</option></select></label><div id="detail-files"></div></section>
+      </div>
+      <div class="detail-save"><button id="book-delete" type="button" class="text-button danger">删除图书</button><span id="detail-message" role="status"></span><button id="book-save" class="button primary">保存信息</button></div>
+    </form>
+  </dialog>
+  <dialog id="moaan-folder-dialog" aria-labelledby="moaan-folder-title"><form id="moaan-folder-form"><h2 id="moaan-folder-title">新建墨案分类</h2><p id="moaan-folder-parent" class="folder-path"></p><label class="folder-field" for="moaan-folder-name">分类名称<input id="moaan-folder-name" required maxlength="100" autocomplete="off" placeholder="例如：文学"></label><p id="moaan-folder-error" class="folder-error" role="alert" hidden></p><div class="dialog-actions"><button id="moaan-folder-cancel" type="button" class="button secondary">取消</button><button id="moaan-folder-confirm" class="button primary">创建分类</button></div></form></dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-warning"><form id="delete-form"><h2 id="delete-title">删除这本书？</h2><p id="delete-book-name"></p><p id="delete-warning">将移除书籍信息、阅读进度、评分和阅读笔记，无法撤销。导入源文件、Kindle 上的副本和已归档摘录不会删除。未保存的修改也会丢弃。</p><label class="delete-option"><input id="delete-files" type="checkbox">同时删除本地书库中的所有格式及转换副本</label><p class="detail-hint">不勾选时保留文件，但不再显示在书库中；可重新导入源文件。</p><p id="delete-error" role="alert"></p><div class="dialog-actions"><button id="delete-cancel" type="button" class="button secondary">取消</button><button id="delete-confirm" type="submit" class="button danger-button">确认删除</button></div></form></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <dialog id="folder-dialog" aria-labelledby="folder-dialog-title">
     <form id="folder-form">

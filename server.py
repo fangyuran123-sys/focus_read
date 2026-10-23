@@ -18,7 +18,11 @@ import time
 import urllib.parse
 import zipfile
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from library import Library, safe_name
+from moaan import Moaan
 
 BASE = Path(__file__).resolve().parent
 FORMATS = {'.azw', '.azw3', '.mobi', '.pdf', '.txt', '.kfx', '.prc'}
@@ -29,14 +33,6 @@ SIDECARS = ('.sdr', '.mbp', '.mbp1', '.mbs', '.pdr', '.apnx', '.phl')
 
 def digest(value):
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
-
-
-def safe_name(name):
-    if not name or name in {'.', '..'} or any(c in name for c in '/\\\x00'):
-        raise ValueError('文件名无效。请选择单个文件。')
-    if len(name.encode('utf-8')) > 220 or any(ord(c) < 32 for c in name):
-        raise ValueError('文件名太长或包含控制字符，请先重命名。')
-    return name
 
 
 def contained(path, root):
@@ -120,9 +116,12 @@ class Desk:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY, payload TEXT NOT NULL, imported REAL NOT NULL, batch TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS reading_sessions(id TEXT PRIMARY KEY, started INTEGER NOT NULL, ended INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS transfers(id INTEGER PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, created REAL NOT NULL);
             ''')
         self.status = self.read_setting('snapshot', {'books': [], 'last_scan': None, 'warnings': []})
+        self.library = Library(self)
+        self.moaan = Moaan(self)
 
     @contextmanager
     def db(self):
@@ -304,6 +303,85 @@ class Desk:
                 warnings.append('一个标注数据库读取失败；已有摘录仍保留在本地。')
         return notes, stores
 
+    def import_reading_sessions(self, warnings):
+        try:
+            source = self.device_path('system/fmcache/fmcache.db')
+            if not source.is_file():
+                warnings.append('设备没有可用的阅读会话缓存；已导入的阅读日历仍保留。')
+                return 0
+            sessions, skipped = {}, 0
+            with tempfile.TemporaryDirectory(dir=self.data) as temp:
+                path = self.snapshot_db(source, Path(temp))
+                db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)
+                try:
+                    for (raw,) in db.execute('SELECT session FROM reading_sessions'):
+                        try:
+                            session = json.loads(raw)
+                            payload = session['payload']
+                            if session['schema_name'] != 'reading_session' or session['schema_version'] != 0:
+                                raise ValueError('未知会话版本')
+                            if payload.get('is_complete') is not True:
+                                continue
+                            start, end = payload['start_timestamp'], payload['end_timestamp']
+                            if type(start) is not int or type(end) is not int or not 1167609600000 <= start < end <= (time.time() + 300) * 1000:
+                                raise ValueError('会话时间无效')
+                            identity = payload.get('asin') or payload.get('asset_id')
+                            if not isinstance(identity, str) or not identity:
+                                raise ValueError('会话缺少书籍标识')
+                            key = digest(json.dumps([identity, start], ensure_ascii=False))
+                            sessions[key] = (start, end)
+                        except (ValueError, TypeError, KeyError, AttributeError):
+                            skipped += 1
+                finally:
+                    db.close()
+            with self.db() as db:
+                added = 0
+                for key, (start, end) in sessions.items():
+                    added += db.execute('INSERT OR IGNORE INTO reading_sessions VALUES (?,?,?)', (key, start, end)).rowcount
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('reading_last_sync', json.dumps(time.time())))
+            if skipped:
+                warnings.append(f'{skipped} 条阅读会话结构或时间无效，未计入日历。')
+            return added
+        except (OSError, sqlite3.Error, ValueError):
+            warnings.append('阅读会话缓存读取失败或结构不兼容；已导入的阅读日历仍保留。')
+            return 0
+
+    def reading_activity(self, year=None):
+        today = datetime.now().date()
+        year = today.year if year is None else year
+        if type(year) is not int or not 2007 <= year <= 2100:
+            raise ValueError('年份须在 2007–2100 之间。')
+        start = int(datetime(year, 1, 1).timestamp() * 1000)
+        end = int(datetime(year + 1, 1, 1).timestamp() * 1000)
+        with self.lock, self.db() as db:
+            sessions = db.execute('SELECT started,ended FROM reading_sessions WHERE started<? AND ended>? ORDER BY started,ended', (end, start)).fetchall()
+            bounds = db.execute('SELECT min(started),max(ended) FROM reading_sessions').fetchone()
+            years = {today.year, year}
+            for (timestamp,) in db.execute('SELECT started FROM reading_sessions UNION SELECT ended FROM reading_sessions'):
+                years.add(datetime.fromtimestamp(timestamp / 1000).year)
+            synced_at = self.read_setting('reading_last_sync')
+        # Merge overlapping intervals before splitting at local midnight; never count the same minute twice.
+        intervals = []
+        for a, b in sessions:
+            a, b = max(a, start), min(b, end)
+            if intervals and a <= intervals[-1][1]:
+                intervals[-1][1] = max(intervals[-1][1], b)
+            else:
+                intervals.append([a, b])
+        days = {}
+        for a, b in intervals:
+            while a < b:
+                local = datetime.fromtimestamp(a / 1000)
+                midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time())
+                stop = min(b, int(midnight.timestamp() * 1000))
+                day = local.date().isoformat()
+                days[day] = days.get(day, 0) + (stop - a) / 1000
+                a = stop
+        return {'year': year, 'years': sorted(years, reverse=True), 'today': today.isoformat(), 'days': days,
+                'seconds': sum(days.values()), 'active_days': len(days), 'sessions': len(sessions), 'synced_at': synced_at,
+                'first_date': datetime.fromtimestamp(bounds[0] / 1000).date().isoformat() if bounds[0] else None,
+                'last_date': datetime.fromtimestamp(bounds[1] / 1000).date().isoformat() if bounds[1] else None}
+
     def scan(self):
         with self.lock:
             if not self.connected():
@@ -345,10 +423,11 @@ class Desk:
             database, stores = self.database_notes(books, warnings)
             # Both sources are kept: their position systems differ, so automatic merging risks losing annotations.
             added += self.import_notes(database)
+            reading_added = self.import_reading_sessions(warnings)
             usage = shutil.disk_usage(self.mount)
             self.status = {'books': books, 'folders': folders, 'last_scan': time.time(), 'storage': {'total': usage.total, 'free': usage.free, 'used': usage.used},
                            'warnings': list(dict.fromkeys(warnings)), 'added': added, 'clipping_found': clipping_found,
-                           'annotation_stores': stores, 'database_records': len(database)}
+                           'annotation_stores': stores, 'database_records': len(database), 'reading_added': reading_added}
             self.write_setting('snapshot', self.status)
             return self.view()
 
@@ -373,17 +452,20 @@ class Desk:
                 raise ValueError('支持 EPUB、PDF、AZW3、AZW、MOBI 和 TXT。')
             self.device_path('documents')
             if ext == '.epub':
-                if not self.converter:
-                    raise ValueError('EPUB 转换工具未安装。请安装 calibre 后重启应用。')
                 with tempfile.TemporaryDirectory(dir=self.data) as temp:
                     output = Path(temp) / 'converted.azw3'
-                    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', CALIBRE_CONFIG_DIRECTORY=str(self.data / 'calibre-config'))
-                    proc = subprocess.run([self.converter, str(source), str(output), '--output-profile', 'kindle_pw3'],
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, env=env)
-                    if proc.returncode or not output.is_file():
-                        raise ValueError('EPUB 转换失败。请检查文件是否完整、是否受加密保护。')
+                    self.convert_epub(source, output)
                     return self.copy_to_device(output, str(Path(name).with_suffix('.azw3')), folder)
             return self.copy_to_device(source, name, folder)
+
+    def convert_epub(self, source, output):
+        if not self.converter:
+            raise ValueError('EPUB 转换工具未安装。请安装 calibre 后重启应用。')
+        env = dict(os.environ, QT_QPA_PLATFORM='offscreen', CALIBRE_CONFIG_DIRECTORY=str(self.data / 'calibre-config'))
+        proc = subprocess.run([self.converter, str(source), str(output), '--output-profile', 'kindle_pw3'],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, env=env)
+        if proc.returncode or not output.is_file():
+            raise ValueError('EPUB 转换失败。请检查文件是否完整、是否受加密保护。')
 
     def copy_to_device(self, source, name, destination=None):
         folder = self.folder_path('Kindle Desk' if destination is None else destination)
@@ -452,6 +534,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def image(self, data):
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/jpeg')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'private, max-age=86400')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def download(self, source, filename):
+        with source.open('rb') as stream:
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(os.fstat(stream.fileno()).st_size))
+            self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + urllib.parse.quote(filename))
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            shutil.copyfileobj(stream, self.wfile)
+
     def allowed(self, write=False):
         host = self.headers.get('Host', '')
         if host not in self.server.allowed_hosts:
@@ -474,6 +576,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path)
         try:
+            if path.path == '/api/moaan':
+                return self.respond(200, self.desk.moaan.view())
+            if path.path == '/api/moaan/file':
+                query = urllib.parse.parse_qs(path.query)
+                with self.desk.lock:
+                    book, source = self.desk.moaan.file(query.get('id', [''])[0])
+                    return self.download(source, book['name'])
+            if path.path == '/api/reading':
+                query = urllib.parse.parse_qs(path.query)
+                year = int(query['year'][0]) if 'year' in query else None
+                return self.respond(200, self.desk.reading_activity(year))
+            if path.path == '/api/library':
+                query = urllib.parse.parse_qs(path.query)
+                return self.respond(200, self.desk.library.listing(query.get('q', [''])[0], query.get('status', [''])[0],
+                                                                  query.get('tag', [''])[0], int(query.get('page', ['1'])[0]),
+                                                                  query.get('sort', ['recent'])[0], int(query.get('rating', ['0'])[0])))
+            if path.path == '/api/library/book':
+                query = urllib.parse.parse_qs(path.query)
+                return self.respond(200, self.desk.library.book(query.get('id', [''])[0]))
+            if path.path == '/api/cover':
+                query = urllib.parse.parse_qs(path.query)
+                cover = self.desk.library.cover_path(query.get('book', [''])[0])
+                if cover is None:
+                    return self.respond(404, {'error': '这本书没有封面。'})
+                return self.image(cover.read_bytes())
+            if path.path == '/api/library/file':
+                query = urllib.parse.parse_qs(path.query)
+                info, source = self.desk.library.file(query.get('id', [''])[0])
+                return self.download(source, info['name'])
             if path.path == '/api/state':
                 return self.respond(200, self.desk.view())
             if path.path == '/api/book':
@@ -483,23 +614,76 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(404, {'error': '未找到该书籍，请重新扫描。'})
                 source = self.desk.device_path(book['path'])
                 return self.respond(200, source.read_bytes(), 'application/octet-stream', book['name'])
-            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8')}
+            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'),
+                      '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/library.js': ('library.js', 'text/javascript; charset=utf-8'),
+                      '/library.css': ('library.css', 'text/css; charset=utf-8'), '/reading.js': ('reading.js', 'text/javascript; charset=utf-8'), '/moaan.js': ('moaan.js', 'text/javascript; charset=utf-8'), '/icon.svg': ('icon.svg', 'image/svg+xml')}
             if path.path in static:
                 name, kind = static[path.path]
                 return self.respond(200, (BASE / 'web' / name).read_bytes(), kind)
             self.respond(404, {'error': '页面不存在。'})
-        except (OSError, ValueError):
-            self.respond(409, {'error': '设备或文件不可用，请检查连接后刷新。'})
+        except (OSError, ValueError, sqlite3.Error):
+            self.respond(409, {'error': '设备、书库或文件不可用，请检查连接和数据目录后重试。'})
 
     def do_POST(self):
         if not self.allowed(write=True):
             return
         path = urllib.parse.urlsplit(self.path)
         try:
+            if path.path in {'/api/moaan/scan', '/api/moaan/import', '/api/moaan/send', '/api/moaan/folders'}:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 16384:
+                    raise ValueError('墨案请求为空或过大。')
+                self.connection.settimeout(30)
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('墨案请求格式无效。')
+                if path.path == '/api/moaan/scan':
+                    return self.respond(200, self.desk.moaan.scan(payload.get('folder', '')))
+                if path.path == '/api/moaan/folders':
+                    return self.respond(200, self.desk.moaan.create_folder(payload.get('parent', ''), payload.get('name'), payload.get('device_id')))
+                if not isinstance(payload.get('id'), str):
+                    raise ValueError('墨案图书标识无效。')
+                if path.path == '/api/moaan/import':
+                    return self.respond(200, self.desk.moaan.import_book(payload['id']))
+                return self.respond(200, self.desk.moaan.send(payload['id'], payload.get('folder'), payload.get('device_id')))
             if path.path == '/api/scan':
                 return self.respond(200, self.desk.scan())
             if path.path == '/api/eject':
                 return self.respond(200, self.desk.eject())
+            if path.path == '/api/library/cover':
+                query = urllib.parse.parse_qs(path.query)
+                file_id = query.get('id', [''])[0]
+                generate = query.get('generate', ['0'])[0]
+                length = int(self.headers.get('Content-Length', '0'))
+                if generate == '1' and length == 0:
+                    return self.respond(200, self.desk.library.apply_cover(file_id))
+                if generate != '0' or not 0 < length <= 8 * 1024 * 1024:
+                    raise ValueError('请选择最多 8 MiB 的 JPEG/PNG，或使用自动生成封面。')
+                self.connection.settimeout(30)
+                with tempfile.TemporaryDirectory(dir=self.desk.data) as temp:
+                    image = Path(temp) / 'upload.image'
+                    remaining = length
+                    with image.open('xb') as out:
+                        while remaining:
+                            chunk = self.rfile.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                raise ValueError('封面上传中断，请重试。')
+                            out.write(chunk)
+                            remaining -= len(chunk)
+                    return self.respond(200, self.desk.library.apply_cover(file_id, image))
+            if path.path in {'/api/library/update', '/api/library/send', '/api/library/delete'}:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 131072:
+                    raise ValueError('请求为空或过大。')
+                self.connection.settimeout(10)
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict) or not isinstance(payload.get('id'), str):
+                    raise ValueError('图书请求格式无效。')
+                if path.path == '/api/library/update':
+                    return self.respond(200, self.desk.library.update(payload))
+                if path.path == '/api/library/delete':
+                    return self.respond(200, self.desk.library.delete(payload['id'], payload.get('delete_files', False)))
+                return self.respond(200, self.desk.library.send(payload['id'], payload.get('folder')))
             if path.path in {'/api/folders', '/api/move'}:
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 < length <= 16384:
@@ -518,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = markdown_zip(notes)
                 self.desk.write_setting('last_export', time.time())
                 return self.respond(200, data, 'application/zip', 'Kindle摘录.zip')
-            if path.path not in {'/api/upload', '/api/import'}:
+            if path.path not in {'/api/upload', '/api/import', '/api/library/import', '/api/moaan/upload'}:
                 return self.respond(404, {'error': '操作不存在。'})
             length = int(self.headers.get('Content-Length', '0'))
             limit = 10 * 1024 * 1024 if path.path == '/api/import' else MAX_UPLOAD
@@ -536,12 +720,18 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('文件上传中断，请重试。')
                         out.write(chunk)
                         remaining -= len(chunk)
+                if path.path == '/api/moaan/upload':
+                    query = urllib.parse.parse_qs(path.query)
+                    return self.respond(200, self.desk.moaan.copy_to_device(source, name, query.get('folder', [''])[0], query.get('device_id', [''])[0]))
                 if path.path == '/api/import':
                     notes, skipped = parse_clippings(source.read_text(encoding='utf-8-sig'))
                     if not notes:
                         raise ValueError('未识别到摘录，请选择 Kindle 的 My Clippings.txt。')
                     added = self.desk.import_notes(notes)
                     return self.respond(200, {'added': added, 'skipped': skipped})
+                if path.path == '/api/library/import':
+                    book_id = urllib.parse.parse_qs(path.query).get('book', [None])[0]
+                    return self.respond(200, self.desk.library.import_file(source, name, book_id))
                 folder = urllib.parse.parse_qs(path.query, keep_blank_values=True).get('folder', [None])[0]
                 self.respond(200, self.desk.send(source, name, folder))
         except (ValueError, UnicodeError) as e:

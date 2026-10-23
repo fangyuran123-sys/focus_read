@@ -1,7 +1,7 @@
 FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 calibre fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends python3 python3-pil calibre fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home kindle \
     && mkdir -p /app/data /kindle \
@@ -9,7 +9,7 @@ RUN apt-get update \
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp QT_QPA_PLATFORM=offscreen
-COPY server.py ./
+COPY server.py library.py cover_tools.py moaan.py ./
 COPY web ./web
 USER 1000:1000
 ARG VERSION=0.2.0
